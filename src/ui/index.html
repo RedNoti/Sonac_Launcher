@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>sonac launcher</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="icons.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main id="signin" class="signin">
+    <section class="login-card">
+      <img src="app.png" class="brand" width="62" height="62" alt="">
+      <h1>sonac launcher</h1>
+      <p class="intro">파일을 동기화할 저장소에 로그인하세요.</p>
+      <form id="login-form">
+        <label>저장소
+          <select name="provider">
+            <option value="synology">Synology NAS</option>
+            <option value="webdav">WebDAV 클라우드</option>
+          </select>
+        </label>
+        <label id="address-label">DSM HTTPS 주소
+          <input type="url" name="url" placeholder="https://nas.example.com:5001" required spellcheck="false">
+        </label>
+        <label>사용자 이름
+          <input name="user" autocomplete="username" required spellcheck="false">
+        </label>
+        <label>비밀번호
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <details id="otp-details">
+          <summary>2단계 인증 사용</summary>
+          <label>인증 앱의 OTP
+            <input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6자리 코드">
+          </label>
+        </details>
+        <label class="check"><input type="checkbox" name="remember"> 이 PC에서 로그인 유지</label>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button type="submit" class="primary" id="login-button">로그인</button>
+      </form>
+    </section>
+  </main>
+
+  <main id="home" class="home" hidden>
+    <header class="page-header">
+      <h1>sonac launcher</h1>
+      <div class="header-actions">
+        <span class="tagline">NAS · 파일 · Git을 한 곳에서</span>
+        <button id="account-button" class="account-button" title="계정 및 연결" aria-label="계정 및 연결"></button>
+      </div>
+    </header>
+    <div id="groups" class="groups"></div>
+    <section class="sync-card" aria-labelledby="sync-heading">
+      <div class="sync-intro">
+        <div class="sync-emblem" id="sync-icon"></div>
+        <div>
+          <h2 id="sync-heading">런처 편집 파일 동기화</h2>
+          <p id="sync-description">모든 PC에서 같은 런처 구성을 사용</p>
+        </div>
+      </div>
+      <div class="device-status">
+        <div class="chip"><span id="sync-dot" class="dot"></span><span id="sync-status" role="status"></span></div>
+        <small id="sync-extra" hidden></small>
+      </div>
+      <div class="sync-actions">
+        <button class="primary" id="sync-now">지금 동기화</button>
+        <button id="edit-button">런처 편집</button>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="browser" class="wide">
+    <header class="dialog-header">
+      <div><h2 id="browser-title">File Station</h2><p id="browser-label"></p></div>
+      <button class="close" data-close="browser" aria-label="닫기">×</button>
+    </header>
+    <div class="browser-toolbar">
+      <button id="up-button" class="icon-button" title="상위 폴더" aria-label="상위 폴더">↑</button>
+      <nav id="breadcrumbs" aria-label="폴더 경로"></nav>
+      <button id="refresh-button">새로고침</button>
+      <button class="primary" id="upload-button">파일 업로드</button>
+      <button class="primary" id="pick-button" hidden>이 폴더 선택</button>
+    </div>
+    <p class="notice" id="browser-status" role="status" hidden></p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th scope="col">이름</th><th scope="col">크기</th><th scope="col">수정일</th><th scope="col"><span class="sr-only">동작</span></th></tr></thead>
+        <tbody id="file-list"></tbody>
+      </table>
+    </div>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <header class="dialog-header">
+      <div><h2>백업 · 동기화</h2><p>클라우드에만 있는 파일을 이 PC로 다운로드합니다.</p></div>
+      <button class="close" data-close="settings-dialog" aria-label="닫기">×</button>
+    </header>
+    <form id="settings-form">
+      <label>클라우드 폴더
+        <span class="picker"><input name="remote" readonly placeholder="저장소에서 폴더 선택"><button id="pick-remote" type="button">찾아보기</button></span>
+      </label>
+      <label>이 PC의 폴더
+        <span class="picker"><input name="local" readonly placeholder="저장할 위치 선택"><button id="pick-local" type="button">찾아보기</button></span>
+      </label>
+      <label>자동 확인 간격
+        <select name="interval">
+          <option value="1">1분</option><option value="5">5분</option><option value="15">15분</option><option value="30">30분</option><option value="60">60분</option>
+        </select>
+      </label>
+      <label class="check"><input name="automatic" type="checkbox"> 자동 동기화</label>
+      <label class="check"><input name="launchAtLogin" type="checkbox"> PC에 로그인하면 런처 시작</label>
+      <p class="notice" id="settings-error" role="alert" hidden></p>
+      <footer class="dialog-actions"><button type="button" data-close="settings-dialog">취소</button><button type="submit" class="primary">저장</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="editor" class="wide editor">
+    <header class="dialog-header">
+      <div><h2>런처 편집</h2><p id="editor-description"></p></div>
+      <button class="close" data-close="editor" aria-label="닫기">×</button>
+    </header>
+    <form id="editor-form">
+      <div class="editor-content">
+        <h3>기본 바로가기</h3>
+        <div id="built-in-links"></div>
+        <div class="section-header"><h3>추가한 바로가기</h3><button id="add-shortcut" type="button">+ 바로가기 추가</button></div>
+        <div id="custom-links"></div>
+      </div>
+      <p class="notice" id="editor-error" role="alert" hidden></p>
+      <footer class="dialog-actions"><button type="button" data-close="editor">취소</button><button type="submit" class="primary">저장</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="account">
+    <header class="dialog-header">
+      <div><h2>계정 및 연결</h2><p id="account-server"></p></div>
+      <button class="close" data-close="account" aria-label="닫기">×</button>
+    </header>
+    <dl><dt>사용자</dt><dd id="account-user"></dd><dt>이 PC</dt><dd id="account-device"></dd></dl>
+    <p class="notice" id="account-error" role="alert" hidden></p>
+    <footer class="dialog-actions"><button id="logout-button">로그아웃</button><button id="account-settings" class="primary">동기화 설정</button></footer>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

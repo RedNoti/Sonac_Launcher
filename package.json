@@ -1,0 +1,21 @@
+{
+  "name": "sonac_launcher",
+  "productName": "sonac launcher",
+  "version": "0.1.0",
+  "description": "Windows와 macOS용 개인 파일 런처",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "node scripts/package.mjs mac",
+    "build:win": "node scripts/package.mjs win",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/storage.js && node --check src/sync.js && node --check src/ui/app.js"
+  },
+  "dependencies": {
+    "saxes": "5.0.1"
+  },
+  "devDependencies": {
+    "@electron/asar": "3.4.1",
+    "electron": "44.5.1"
+  }
+}
