@@ -1,3 +1,5 @@
+<img src="docs/sonac-studio-logo.png" alt="소낙 스튜디오 로고" width="96">
+
 # sonac launcher
 
 Synology NAS 또는 WebDAV 저장소에 로그인해 파일과 런처 바로가기를 여러 PC에서 사용할 수 있는 Windows·macOS 데스크톱 앱입니다.
