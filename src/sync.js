@@ -128,7 +128,7 @@ async function downloadFile(store, row, destination, { signal, replace = false }
   }
 }
 
-async function pullFiles(store, settings, { signal, progress, layout }) {
+async function pullFiles(store, settings, { signal, progress, layout, file }) {
   const root = await fs.realpath(settings.local);
   const pending = [{ remote: settings.remote, local: root, root: true }];
   const counts = { downloaded: 0, skipped: 0, errors: 0, message: '' };
@@ -155,7 +155,7 @@ async function pullFiles(store, settings, { signal, progress, layout }) {
       signal?.throwIfAborted();
       try {
         if (row.path !== childPath(folder.remote, row.name)) throw new Error('파일 경로를 확인할 수 없습니다.');
-        if (folder.root && row.name === LAYOUT_FILE) {
+        if (folder.root && row.name === LAYOUT_FILE && layout) {
           if (!row.directory) await layout(await readLayout(store, row, signal));
           continue;
         }
@@ -163,8 +163,12 @@ async function pullFiles(store, settings, { signal, progress, layout }) {
         if (row.directory) {
           pending.push({ remote: row.path, local: destination, root: false });
         } else {
-          if (await downloadFile(store, row, destination, { signal })) counts.downloaded++;
+          const downloaded = await downloadFile(store, row, destination, { signal });
+          if (downloaded) counts.downloaded++;
           else counts.skipped++;
+          if (file && (downloaded || (await getStat(destination))?.isFile())) {
+            file(path.relative(root, destination).split(path.sep).join('/'));
+          }
         }
       } catch (error) {
         record(error, row.name);
@@ -175,4 +179,63 @@ async function pullFiles(store, settings, { signal, progress, layout }) {
   return counts;
 }
 
-module.exports = { LAYOUT_FILE, cleanLayout, webLink, pullFiles, downloadFile };
+async function scanMissing(store, settings, signal, file) {
+  const root = await fs.realpath(settings.local);
+  const folders = [{ remote: settings.remote, local: root, root: true }];
+  const result = { pending: false, downloaded: 0, skipped: 0, errors: 0, message: '' };
+  while (folders.length) {
+    signal.throwIfAborted();
+    const folder = folders.pop();
+    for (const entry of await store.list(folder.remote, signal)) {
+      signal.throwIfAborted();
+      if (entry.path !== childPath(folder.remote, entry.name)) throw new Error('파일 경로를 확인할 수 없습니다.');
+      if (folder.root && entry.name === LAYOUT_FILE) {
+        if (entry.directory) continue;
+        const layout = await readLayout(store, entry, signal);
+        if (JSON.stringify(layout) !== JSON.stringify(cleanLayout(settings.layout))) return { ...result, pending: true };
+        continue;
+      }
+      const destination = path.join(folder.local, localName(entry.name));
+      const info = await getStat(destination);
+      if (!info) return { ...result, pending: true };
+      if (entry.directory) {
+        if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('같은 이름의 로컬 파일 또는 심볼릭 링크가 있습니다.');
+        folders.push({ remote: entry.path, local: destination, root: false });
+      } else {
+        result.skipped++;
+        if (info.isFile()) file?.(path.relative(root, destination).split(path.sep).join('/'));
+      }
+    }
+  }
+  return result;
+}
+
+async function downloadSelection(store, entries, directory, signal) {
+  const result = { downloaded: 0, skipped: 0, errors: 0, message: '' };
+  for (const entry of entries) {
+    signal.throwIfAborted();
+    try {
+      const destination = path.join(directory, localName(entry.name));
+      if (!entry.directory) {
+        if (await downloadFile(store, entry, destination, { signal })) result.downloaded++;
+        else result.skipped++;
+        continue;
+      }
+      await safeDirectory(destination);
+      const nested = await pullFiles(store, { local: destination, remote: entry.path }, {
+        signal, progress() {}, layout() {}
+      });
+      result.downloaded += nested.downloaded;
+      result.skipped += nested.skipped;
+      result.errors += nested.errors;
+      result.message ||= nested.message;
+    } catch (error) {
+      signal.throwIfAborted();
+      result.errors++;
+      result.message ||= entry.name + ' · ' + (error.code ? '로컬 파일에 접근할 수 없습니다. (' + error.code + ')' : error.message);
+    }
+  }
+  return result;
+}
+
+module.exports = { LAYOUT_FILE, cleanLayout, webLink, pullFiles, scanMissing, downloadFile, downloadSelection, getStat, safeDirectory };

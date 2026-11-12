@@ -8,13 +8,14 @@ const APIS = {
   auth: 'SYNO.API.Auth',
   list: 'SYNO.FileStation.List',
   download: 'SYNO.FileStation.Download',
-  upload: 'SYNO.FileStation.Upload'
+  upload: 'SYNO.FileStation.Upload',
+  delete: 'SYNO.FileStation.Delete'
 };
 const DSM_ERRORS = {
   105: '이 계정에는 File Station 사용 권한이 없습니다.',
   106: '로그인 세션이 만료됐습니다.',
   107: '로그인 세션이 종료됐습니다.',
-  119: '로그인 세션이 만료됐습니다.',
+  119: 'DSM이 로그인 세션을 확인하지 못했습니다.',
   400: 'DSM 사용자 이름 또는 비밀번호를 확인하세요.',
   401: 'DSM 계정이 비활성화됐거나 이 작업에 필요한 권한이 없습니다.',
   402: 'DSM 계정 또는 파일에 대한 접근이 거부됐습니다.',
@@ -27,6 +28,7 @@ const DSM_ERRORS = {
   416: 'DSM에서 이 계정의 2단계 인증을 설정해야 합니다.',
   417: 'DSM에서 이 계정의 로그인을 일시적으로 차단했습니다.',
   418: 'DSM 계정이 비활성화됐습니다.',
+  900: 'NAS에서 항목을 삭제할 수 없습니다. 공유 폴더 권한을 확인하세요.',
   1805: 'NAS에 같은 이름의 파일이 이미 있습니다.'
 };
 
@@ -103,18 +105,35 @@ async function checked(response) {
   throw new Error(`${errors[response.status] || '저장소 요청에 실패했습니다.'} (HTTP ${response.status})`);
 }
 
-async function dsmJSON(response) {
+async function dsmJSON(response, phase = '') {
   await checked(response);
   const payload = await response.json().catch(() => {
     throw new Error('DSM API 응답을 읽을 수 없습니다. DSM 직접 접속 주소를 확인하세요.');
   });
   if (payload?.success === true) return payload.data;
   const code = Number(payload?.error?.code);
-  const error = new Error(Number.isInteger(code)
+  const message = Number.isInteger(code)
     ? `${DSM_ERRORS[code] || 'DSM 요청이 실패했습니다.'} (DSM ${code})`
-    : 'DSM API 응답 형식이 올바르지 않습니다.');
+    : 'DSM API 응답 형식이 올바르지 않습니다.';
+  const error = new Error(phase ? phase + ' · ' + message : message);
   error.dsmCode = code;
   throw error;
+}
+
+function dsmSession(response, data) {
+  const validId = value => typeof value === 'string' && /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/u.test(value);
+  const cookieId = response.headers.getSetCookie()
+    .map(cookie => /^id=([^;]*)/u.exec(cookie)?.[1].trim().replace(/^"([^"]*)"$/u, '$1'))
+    .find(validId);
+  const id = cookieId || data?.sid;
+  if (!validId(id)) throw new Error('DSM 로그인 응답에서 세션 ID를 받을 수 없습니다.');
+  const headers = { Cookie: 'id=' + id };
+  const parameters = {};
+  if (typeof data?.synotoken === 'string' && data.synotoken) {
+    headers['X-SYNO-TOKEN'] = data.synotoken;
+    parameters.SynoToken = data.synotoken;
+  }
+  return { headers, parameters };
 }
 
 class Synology {
@@ -129,20 +148,22 @@ class Synology {
     infoURL.search = new URLSearchParams({
       api: 'SYNO.API.Info', version: '1', method: 'query', query: Object.values(APIS).join(',')
     });
-    const info = await dsmJSON(await request(infoURL, {}, signal));
-    const supported = { auth: 6, list: 2, download: 2, upload: 2 };
+    const info = await dsmJSON(await request(infoURL, {}, signal), 'DSM API 조회');
+    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2 };
+    delete this.methods.delete;
     for (const [type, api] of Object.entries(APIS)) {
       const entry = info?.[api];
       const version = Math.max(Number(entry?.minVersion), Math.min(supported[type], Number(entry?.maxVersion)));
       if (!/^(?:[\w-]+\/)*[\w.-]+\.cgi$/u.test(entry?.path || '') || !Number.isInteger(version) ||
           version > Number(entry.maxVersion) || (type !== 'auth' && version < 2)) {
+        if (type === 'delete') continue;
         throw new Error('DSM File Station API를 찾을 수 없습니다. NAS에서 File Station 패키지 상태를 확인하세요.');
       }
       this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, this.profile.url) };
     }
     const auth = {
       account: this.profile.user, passwd: secret.password, session: 'FileStation',
-      format: 'sid', enable_syno_token: 'yes'
+      format: 'cookie', enable_syno_token: 'yes'
     };
     if (otp) auth.otp_code = otp;
     if (secret.deviceId) auth.device_id = secret.deviceId;
@@ -150,28 +171,29 @@ class Synology {
       auth.enable_device_token = 'yes';
       auth.device_name = 'sonac launcher';
     }
-    const data = await dsmJSON(await this.post('auth', 'login', auth, signal));
-    if (typeof data?.sid !== 'string' || !data.sid) throw new Error('DSM 로그인 세션을 받을 수 없습니다.');
-    this.session = { _sid: data.sid };
-    if (typeof data.synotoken === 'string' && data.synotoken) this.session.SynoToken = data.synotoken;
+    const response = await this.post('auth', 'login', auth, signal);
+    const data = await dsmJSON(response, 'DSM 계정 인증');
+    this.session = dsmSession(response, data);
     try {
       await this.list('/', signal);
     } catch (error) {
       await this.logout();
+      error.message = 'File Station 연결 확인 · ' + error.message;
       throw error;
     }
-    return { password: secret.password, deviceId: data.did || secret.deviceId };
+    return { password: secret.password, deviceId: data?.did || secret.deviceId };
   }
 
-  parameters(type, method, values) {
+  parameters(type, method, values, session = this.session) {
     const { api, version } = this.methods[type];
-    const session = type === 'auth' && method === 'login' ? null : this.session;
-    return { api, version, method, ...session, ...values };
+    return { api, version, method, ...session?.parameters, ...values };
   }
 
   post(type, method, values, signal, timeout) {
+    const session = type === 'auth' && method === 'login' ? null : this.session;
     return request(this.methods[type].url, {
-      method: 'POST', body: new URLSearchParams(this.parameters(type, method, values))
+      method: 'POST', headers: session?.headers,
+      body: new URLSearchParams(this.parameters(type, method, values, session))
     }, signal, timeout);
   }
 
@@ -235,9 +257,17 @@ class Synology {
     await dsmJSON(await request(this.methods.upload.url, {
       method: 'POST', duplex: 'half', body: parts(),
       headers: {
+        ...this.session?.headers,
         'Content-Type': 'multipart/form-data; boundary=' + boundary,
         'Content-Length': String(preamble.length + content.size + ending.length)
       }
+    }, signal, 3600000));
+  }
+
+  async delete(entry, signal) {
+    if (!this.methods.delete) throw new Error('이 NAS에서 File Station 삭제 기능을 사용할 수 없습니다.');
+    await dsmJSON(await this.post('delete', 'delete', {
+      path: JSON.stringify([remotePath(entry.path)]), recursive: String(entry.directory)
     }, signal, 3600000));
   }
 
@@ -371,6 +401,12 @@ class WebDAV {
       method: 'PUT', body: content, headers
     }, signal, 3600000);
     await response.body?.cancel();
+  }
+
+  async delete(entry, signal) {
+    const response = await this.send(this.url(entry.path, entry.directory), { method: 'DELETE' }, signal, 3600000);
+    await response.body?.cancel();
+    if (response.status === 207) throw new Error('저장소에서 일부 항목을 삭제하지 못했습니다.');
   }
 
   async logout() {

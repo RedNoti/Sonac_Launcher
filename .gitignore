@@ -1,3 +1,6 @@
 node_modules/
 dist/
 .DS_Store
+.sonac-update-key.pem
+.sonac-update-url
+.sonac-key-*/
