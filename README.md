@@ -2,7 +2,7 @@
 
 # sonac launcher
 
-Synology NAS 또는 WebDAV 저장소에 로그인해 파일과 런처 바로가기를 여러 PC에서 사용할 수 있는 Windows·macOS 데스크톱 앱입니다.
+Synology NAS에 로그인해 파일과 런처 바로가기를 여러 PC에서 사용할 수 있는 Windows·macOS 데스크톱 앱입니다.
 
 ## 설치
 
@@ -15,7 +15,6 @@ Synology NAS 또는 WebDAV 저장소에 로그인해 파일과 런처 바로가�
 
 1. **Synology NAS**를 선택하고 DSM의 직접 접속 주소를 입력합니다. 예시는 `https://nas.example.com:5001`입니다. NAS에 등록한 DSM 사용자 이름과 비밀번호로 로그인합니다. 인증 앱을 사용 중이면 **2단계 인증 사용**에서 OTP를 입력합니다.
 2. 홈 화면에서 **파일 스테이션**을 누르면 앱 창 전체에서 공유 폴더를 탐색할 수 있습니다. 파일과 폴더는 기본으로 격자에 표시되며 상단 버튼에서 목록으로 전환할 수 있습니다. 폴더를 더블 클릭하거나 선택 후 **폴더 열기**로 이동합니다.
-3. WebDAV 저장소를 쓸 때는 **WebDAV 클라우드**를 선택하고 HTTPS 접속 주소와 계정을 입력합니다. 로그인 후 **클라우드 파일**에서 파일을 전송할 수 있습니다.
 
 Synology 파일 전송은 런처 안에서 File Station API로 처리됩니다. 연결하려면 해당 PC에서 DSM HTTPS 주소에 도달할 수 있어야 하고, DSM 계정에 File Station과 공유 폴더 권한이 있어야 합니다. 업로드에는 쓰기 권한이 필요합니다. 인증서 오류가 표시되면 인증서에 등록된 호스트 이름으로 접속하고 해당 인증서의 발급 체인을 확인합니다. [Synology DSM 로그인 API](https://kb.synology.com/ko-kr/DG/DSM_Login_Web_API_Guide/3) · [File Station API](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Package/FileStation/All/enu/Synology_File_Station_API_Guide.pdf)
 
@@ -25,7 +24,7 @@ Synology 파일 전송은 런처 안에서 File Station API로 처리됩니다. 
 
 ## 여러 PC에서 파일 받기
 
-1. 모든 PC에서 같은 저장소와 계정으로 로그인합니다. PC를 재시작한 뒤에도 자동으로 연결하려면 **이 PC에서 로그인 유지**를 선택합니다.
+1. 모든 PC에서 같은 Synology NAS에 같은 계정으로 로그인합니다. PC를 재시작한 뒤에도 자동으로 연결하려면 **이 PC에서 로그인 유지**를 선택합니다.
 2. 각 PC에서 **백업 · 동기화**를 열고 같은 **클라우드 폴더**와 각 PC에서 사용할 저장 위치를 고릅니다.
 3. 자동 확인 간격은 기본 5분입니다. **지금 동기화**로 즉시 확인할 수 있습니다. 자동 동기화가 켜진 상태에서 창을 닫으면 메뉴 막대 또는 알림 영역에 남아 확인을 계속합니다. 앱을 완전히 종료하면 다음 실행과 로그인 후 확인을 재개합니다.
 4. 프로필 옆의 연필 버튼으로 GitHub 주소를 편집합니다. 동기화 폴더가 연결되어 있으면 저장 시 `sonac-launcher.config.json`을 클라우드에 기록하고, 다른 PC가 다음 동기화에서 가져갑니다.
