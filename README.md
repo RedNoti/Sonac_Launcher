@@ -2,7 +2,7 @@
 
 # sonac launcher
 
-Synology NAS에 로그인해 파일과 런처 바로가기를 여러 PC에서 사용할 수 있는 Windows·macOS 데스크톱 앱입니다.
+Synology NAS에 로그인해 파일 관리를하고 같은 파일을 여러 기기에 똑같이 동기화 하여 같은 개발 / 영상 편집 환경을 구축하는 Windows·macOS 데스크톱 앱입니다.
 
 ## 설치
 
