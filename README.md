@@ -4,6 +4,8 @@
 
 Synology NAS에 로그인해 파일 관리를하고 같은 파일을 여러 기기에 똑같이 동기화 하여 같은 개발 / 영상 편집 환경을 구축하는 Windows·macOS 데스크톱 앱입니다.
 
+![파일 스테이션, GitHub, 동기화 영역이 보이는 sonac launcher 메인 화면](docs/launcher-home.png)
+
 ## 설치
 
 - Windows 64비트 Intel·AMD는 설치 프로그램을 실행합니다. 설치 후 시작 메뉴에서 **sonac launcher**를 실행합니다. [Windows 설치 프로그램](dist/sonac_launcher-0.1.9-win-x64-setup.exe)
