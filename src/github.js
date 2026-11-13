@@ -1,5 +1,7 @@
 'use strict';
 
+const { httpsFetch } = require('./transport');
+
 const origin = 'https://api.github.com';
 
 function repositoryPath(repository) {
@@ -11,7 +13,7 @@ function repositoryPath(repository) {
 }
 
 async function request(path, token, signal) {
-  const response = await fetch(origin + path, {
+  const response = await httpsFetch(origin + path, {
     headers: {
       Authorization: 'Bearer ' + token,
       Accept: 'application/vnd.github+json',
@@ -78,7 +80,7 @@ async function archive(repository, sha, token, signal) {
   if (!url || url.origin !== 'https://codeload.github.com' || url.username || url.password) {
     throw new Error('GitHub 압축 파일의 다운로드 주소를 확인할 수 없습니다.');
   }
-  return checked(await fetch(url, { redirect: 'error', signal }));
+  return checked(await httpsFetch(url, { redirect: 'error', signal }));
 }
 
 module.exports = { repositoryPath, identity, repositories, latestCommit, archive };

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <title>sonac launcher · 터미널</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <script defer src="icons.js"></script>
+  <script type="module" src="terminal-ui.mjs"></script>
+</head>
+<body>
+  <main class="terminal-page" aria-labelledby="terminal-title">
+    <header class="terminal-header">
+      <div class="terminal-heading">
+        <button id="terminal-home" class="work-back">← 홈</button>
+        <h1 id="terminal-title">터미널</h1>
+      </div>
+      <button id="terminal-commands-toggle" type="button" popovertarget="terminal-commands"
+        aria-label="저장한 명령어" title="저장한 명령어">
+        <span class="terminal-bookmark" aria-hidden="true"></span>
+      </button>
+      <section id="terminal-commands" class="terminal-commands" popover aria-label="저장한 명령어">
+        <div class="terminal-commands-toolbar">
+          <select id="terminal-command-filter" aria-label="명령어 분류" hidden></select>
+          <button id="terminal-command-add" type="button" class="primary"
+            aria-label="명령어 추가" title="명령어 추가" disabled>
+            <span class="terminal-add-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div id="terminal-command-list" class="terminal-command-list" role="group" aria-label="명령어 목록"></div>
+        <p id="terminal-commands-error" class="notice bad" role="alert" hidden></p>
+      </section>
+    </header>
+    <section class="terminal-panel" aria-label="로컬 터미널">
+      <p id="terminal-status" class="notice" role="status" hidden></p>
+      <div id="terminal-body"></div>
+    </section>
+  </main>
+  <dialog id="terminal-command-editor" aria-labelledby="terminal-command-title">
+    <header class="dialog-header">
+      <h2 id="terminal-command-title">명령어 추가</h2>
+      <button id="terminal-command-close" class="close" aria-label="닫기" type="button">×</button>
+    </header>
+    <form id="terminal-command-form" autocomplete="off">
+      <label>이름<input name="name" maxlength="60" placeholder="예: Git 상태" required></label>
+      <label>분류<input name="category" maxlength="40" list="terminal-command-categories" placeholder="예: Git"></label>
+      <datalist id="terminal-command-categories"></datalist>
+      <label>명령어 (한 줄)<textarea name="command" rows="3" maxlength="4096" spellcheck="false"
+        placeholder="git status" required></textarea></label>
+      <p id="terminal-command-error" class="notice bad" role="alert" hidden></p>
+      <footer class="dialog-actions">
+        <button id="terminal-command-remove" class="danger" type="button" hidden>삭제</button>
+        <button class="primary" type="submit">저장</button>
+      </footer>
+    </form>
+  </dialog>
+</body>
+</html>

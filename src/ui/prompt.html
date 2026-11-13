@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko" class="prompt-page">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>sonac launcher</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="icons.js"></script>
+  <script defer src="prompt.js"></script>
+</head>
+<body>
+  <dialog id="prompt" aria-labelledby="prompt-title" aria-describedby="prompt-message">
+    <div class="update-body">
+      <header class="dialog-header"><h2 id="prompt-title"></h2></header>
+      <p id="prompt-message"></p>
+      <p id="prompt-detail" hidden></p>
+    </div>
+    <footer class="dialog-actions">
+      <button id="prompt-cancel" type="button" autofocus>취소</button>
+      <button id="prompt-accept" type="button" class="primary">확인</button>
+    </footer>
+  </dialog>
+</body>
+</html>

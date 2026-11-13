@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('node:fs/promises');
-const { createReadStream, createWriteStream } = require('node:fs');
+const { constants, createWriteStream } = require('node:fs');
 const { randomUUID } = require('node:crypto');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
@@ -19,7 +19,12 @@ const files = {
   'icons.js': 'text/javascript; charset=utf-8',
   'preview-ui.mjs': 'text/javascript; charset=utf-8',
   'terminal-ui.mjs': 'text/javascript; charset=utf-8',
-  'app.png': 'image/png'
+  'terminal.html': 'text/html; charset=utf-8',
+  'prompt.html': 'text/html; charset=utf-8',
+  'prompt.js': 'text/javascript; charset=utf-8',
+  'app.png': 'image/png',
+  'brand-dark.png': 'image/png',
+  'brand-light.png': 'image/png'
 };
 const vendorFiles = {
   'fflate.mjs': ['fflate/esm/browser.js', 'text/javascript'],
@@ -81,6 +86,7 @@ async function dispose(job) {
   if (!job) return;
   job.controller.abort();
   try { await job.preparing; } catch { /* canceled or failed */ }
+  await job.handle?.close().catch(() => {});
   if (job.temp) await fs.rm(job.temp, { recursive: true, force: true, maxRetries: 4 }).catch(() => {});
 }
 
@@ -120,7 +126,9 @@ async function createPreview(id, entry, { filename, download, signal }) {
       if (!response.body) throw new Error('저장소가 파일 내용을 반환하지 않았습니다.');
       await pipeline(response.body, limit, createWriteStream(job.filename, { flags: 'wx', mode: 0o600 }), { signal: abort });
     }
-    const info = await fs.lstat(job.filename);
+    if (!(await fs.lstat(job.filename)).isFile()) throw new Error('미리 볼 수 있는 파일을 선택하세요.');
+    job.handle = await fs.open(job.filename, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const info = await job.handle.stat();
     if (!info.isFile()) throw new Error('미리 볼 수 있는 파일을 선택하세요.');
     checkSize(info.size, type.limit);
     abort.throwIfAborted();
@@ -135,14 +143,23 @@ async function createPreview(id, entry, { filename, download, signal }) {
   }
 }
 
-async function serve(request) {
+async function serve(request, hostname = 'app') {
   const url = new URL(request.url);
-  if (url.host !== 'app' || !['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 404 });
+  const terminal = new Set(['/terminal.html', '/terminal-ui.mjs', '/style.css', '/vendor/xterm.css',
+    '/vendor/xterm.mjs', '/vendor/fit.mjs']);
+  const prompt = new Set(['/prompt.html', '/prompt.js', '/style.css']);
+  const allowed = hostname === 'terminal' ? terminal.has(url.pathname) || url.pathname === '/icons.js' :
+    hostname === 'prompt' ? prompt.has(url.pathname) || url.pathname === '/icons.js' :
+      url.pathname === '/style.css' || (!terminal.has(url.pathname) && !prompt.has(url.pathname));
+  if (url.protocol !== 'sonac:' || url.host !== hostname || !['GET', 'HEAD'].includes(request.method) || !allowed) {
+    return new Response(null, { status: 404 });
+  }
   const source = asset(url.pathname);
   if (source) {
     try {
       return new Response(request.method === 'HEAD' ? null : await fs.readFile(source.filename), {
-        headers: { 'Content-Type': source.mime, 'X-Content-Type-Options': 'nosniff' }
+        headers: { 'Content-Type': source.mime, 'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "frame-ancestors 'none'; object-src 'none'; frame-src 'none'" }
       });
     } catch {
       return new Response(null, { status: 404 });
@@ -154,7 +171,8 @@ async function serve(request) {
   }
   const headers = {
     'Content-Type': job.type.mime, 'Cache-Control': 'no-store',
-    'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes'
+    'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'; sandbox"
   };
   const range = request.headers.get('range');
   const bounds = range ? byteRange(range, job.size) : null;
@@ -164,7 +182,7 @@ async function serve(request) {
   headers['Content-Length'] = String(bounds ? bounds.end - bounds.start + 1 : job.size);
   if (bounds) headers['Content-Range'] = 'bytes ' + bounds.start + '-' + bounds.end + '/' + job.size;
   const stream = request.method === 'HEAD' || job.size === 0 ? null :
-    Readable.toWeb(createReadStream(job.filename, { ...bounds, signal: job.controller.signal }));
+    Readable.toWeb(job.handle.createReadStream({ start: 0, ...bounds, autoClose: false, signal: job.controller.signal }));
   return new Response(stream, { headers, status: bounds ? 206 : 200 });
 }
 

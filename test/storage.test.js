@@ -2,7 +2,18 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { storage } = require('../src/storage');
+const { endpoint, storage } = require('../src/storage');
+
+test('DSM accepts a bare host or host and port and keeps HTTPS restrictions', () => {
+  assert.equal(endpoint(' sonaccloud.com ', 'synology'), 'https://sonaccloud.com');
+  assert.equal(endpoint('nas.example.test:5001', 'synology'), 'https://nas.example.test:5001');
+  assert.equal(endpoint('[::1]:5001', 'synology'), 'https://[::1]:5001');
+  assert.equal(endpoint('https://nas.example.test/', 'synology'), 'https://nas.example.test');
+  for (const invalid of ['http://nas.example.test', 'nas.example.test/webapi', 'https://user@nas.example.test',
+    'https://nas.example.test/?query', 'nas.example.test#fragment']) {
+    assert.throws(() => endpoint(invalid, 'synology'));
+  }
+});
 
 const profile = { provider: 'synology', url: 'https://nas.example.test', user: 'tester' };
 const methods = {
@@ -18,7 +29,7 @@ test('DSM accepts a session ID starting like a number when carried in its id coo
   const operations = [];
   const success = (data, headers) => Response.json({ success: true, data }, { headers });
 
-  t.mock.method(globalThis, 'fetch', async (url, options) => {
+  t.mock.method(require('undici'), 'fetch', async (url, options) => {
     if (url.pathname === '/webapi/query.cgi') return success(methods);
     const form = options.body instanceof URLSearchParams ? options.body : null;
     if (form?.get('method') === 'login') {

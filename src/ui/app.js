@@ -10,6 +10,7 @@ const groups = [
 ];
 const shortDate = new Intl.DateTimeFormat('ko-KR', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 let state;
+let loginPending = false;
 let tileSignature = '';
 let toastTimer;
 let browserPath = '/';
@@ -26,8 +27,8 @@ let menuTrigger;
 let browseGeneration = 0;
 let transferring = false;
 let loadingFolder = false;
-let filledSavedPassword = false;
 let updateRequested = false;
+let signinCurrentTimer;
 
 function make(tag, text, className) {
   const node = document.createElement(tag);
@@ -70,84 +71,236 @@ function busy(node, action, report = error => toast(error.message)) {
   };
 }
 
-function setProvider() {
+let loginMode = 'register';
+let selectedNas;
+
+function showOtp(visible) {
   const form = elements('login-form');
-  const dsm = form.provider.value === 'synology';
-  $('address-label').firstChild.nodeValue = dsm ? 'DSM HTTPS 주소 ' : 'WebDAV HTTPS 주소 ';
-  form.url.placeholder = dsm ? 'https://nas.example.com:5001' : 'https://cloud.example.com/remote.php/dav/files/사용자/';
-  $('otp-details').hidden = !dsm;
+  $('otp-label').hidden = !visible;
+  form.otp.disabled = !visible;
+  form.otp.required = visible;
+  if (!visible) form.otp.value = '';
+}
+
+function selectNas(profile, { mode = profile ? 'login' : 'register', focus = false } = {}) {
+  loginMode = mode;
+  selectedNas = profile;
+  const form = elements('login-form');
+  const configuring = mode === 'register' || mode === 'edit';
+  const server = mode === 'server';
+  form.name.value = profile?.name || '';
+  form.url.value = profile?.url || '';
+  form.user.value = profile?.user || '';
+  form.password.value = '';
+  form.pin.value = profile?.pin || '';
+  form.remember.checked = !!profile?.saved;
+  form.user.disabled = form.password.disabled = server;
+  form.user.readOnly = mode === 'login';
+  form.name.disabled = form.url.disabled = form.pin.disabled = !configuring;
+  $('nas-name-label').hidden = $('address-label').hidden = $('pin-details').hidden = !configuring;
+  $('pin-details').open = configuring && !!form.pin.value;
+  $('remember-label').hidden = server;
+  $('nas-edit').hidden = !profile;
+  $('nas-edit').setAttribute('aria-label', mode === 'edit' ? '수정 취소' : 'NAS 연결 수정');
+  $('nas-edit').title = $('nas-edit').getAttribute('aria-label');
+  $('login-title').textContent = server ? '서버 업데이터 로그인' :
+    mode === 'edit' ? 'NAS 연결 수정' : profile ? profile.name || new URL(profile.url).host : 'Synology NAS 등록';
+  $('signin-intro').textContent = server ? '전용 인증 서비스 연결을 기다리고 있습니다.' :
+    mode === 'register' ? '연결 이름과 DSM 주소를 등록하세요.' : '';
+  $('signin-intro').hidden = !$('signin-intro').textContent;
+  showOtp(false);
+  drawNasProfiles();
+  savedLoginHint();
+  drawLoginButton();
+  if (focus && !server) (configuring ? form.name : form.password).focus();
+}
+
+function drawLoginButton() {
+  const button = $('login-button');
+  const updating = updateRequested || state.applyingUpdate;
+  button.disabled = loginPending || state.connecting || updating || loginMode === 'server';
+  button.textContent = updating ? '업데이트 중…' : state.connecting ? '연결 중…' :
+    loginMode === 'register' ? '등록하고 로그인' : loginMode === 'edit' ? '저장하고 로그인' : '로그인';
+}
+
+function drawNasProfiles() {
+  const profiles = state.nasProfiles || [];
+  const buttons = profiles.map(profile => {
+    const label = profile.name || new URL(profile.url).host;
+    const item = tile(label, 'dsm', () => { notice('login-error'); selectNas(profile, { focus: true }); });
+    item.append(make('small', profile.user, 'work-meta'));
+    item.setAttribute('aria-pressed', String(profile.id === selectedNas?.id));
+    return item;
+  });
+  const add = tile(profiles.length ? '다른 Synology 추가' : 'Synology NAS 등록', 'add', () => {
+    notice('login-error');
+    selectNas(undefined, { focus: true });
+  });
+  add.setAttribute('aria-pressed', String(loginMode === 'register'));
+  const server = tile('서버 업데이터', 'server-update', () => {
+    notice('login-error');
+    selectNas(undefined, { mode: 'server' });
+  }, 'sync');
+  server.setAttribute('aria-pressed', String(loginMode === 'server'));
+  $('nas-profiles').replaceChildren(...buttons, add);
+  $('signin-server').replaceChildren(server);
 }
 
 function showPage() {
+  const signingIn = !state.connected && (loginPending || state.connecting);
+  const loadingStatus = $('signin-loading-status');
+  if (signingIn && loadingStatus.textContent !== '로그인 중…') loadingStatus.textContent = '로그인 중…';
   $('signin').hidden = state.connected;
-  $('home').hidden = !state.connected || !!browserMode || githubOpen;
+  $('signin-update').inert = signingIn;
+  $('signin-sources').inert = signingIn;
+  $('nas-edit').disabled = signingIn;
+  $('login-form').inert = signingIn;
+  $('signin-loading').hidden = !signingIn;
+  $('signin-version').hidden = state.connected || !state.versionLabel;
+  $('home').hidden = !state.connected || !!browserMode || githubOpen || state.terminalOpen;
   $('github-page').hidden = !state.connected || !!browserMode || !githubOpen;
   $('browser').hidden = !state.connected || !browserMode;
 }
 
-function clearSavedPassword() {
-  if (filledSavedPassword) elements('login-form').password.value = '';
-  filledSavedPassword = false;
+function savedLoginHint() {
+  const form = elements('login-form');
+  const available = form.remember.checked && state?.nasProfiles?.some(profile =>
+    profile.saved && profile.url === form.url.value && profile.user === form.user.value &&
+    (profile.pin || '') === form.pin.value.trim());
+  form.password.required = loginMode !== 'server' && !available;
+  const usingSaved = !!available && !form.password.value;
+  form.password.placeholder = usingSaved ? '••••••••••••' : '';
+  form.password.toggleAttribute('data-saved', usingSaved);
+  $('saved-password-hint').hidden = !usingSaved;
+  if (usingSaved) form.password.setAttribute('aria-describedby', 'saved-password-hint');
+  else form.password.removeAttribute('aria-describedby');
 }
 
-async function fillSavedPassword() {
-  const form = elements('login-form');
-  const { profile } = state;
-  const canFill = () => state.hasRememberedLogin && !state.connected && !state.connecting &&
-    form.remember.checked && !form.password.value && profile &&
-    profile.provider === form.provider.value && profile.url === form.url.value && profile.user === form.user.value;
-  if (!canFill()) return;
-  const password = await api.savedPassword(profile).catch(() => '');
-  if (password && canFill()) {
-    form.password.value = password;
-    filledSavedPassword = true;
+function showSigninCurrent() {
+  clearTimeout(signinCurrentTimer);
+  signinCurrentTimer = setTimeout(() => {
+    signinCurrentTimer = undefined;
+    drawUpdate();
+  }, 5000);
+  drawUpdate();
+}
+
+const updateBar = $('update-bar');
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function hideLeavingUpdateBar() {
+  if (updateBar.hasAttribute('data-leaving')) updateBar.hidden = true;
+}
+updateBar.addEventListener('animationend', event => {
+  if (event.target === updateBar && event.animationName === 'update-out') hideLeavingUpdateBar();
+});
+reducedMotion.addEventListener('change', event => {
+  if (event.matches) hideLeavingUpdateBar();
+});
+
+function drawUpdateBar(message, error, percent) {
+  if (!message) {
+    if (reducedMotion.matches) updateBar.hidden = true;
+    else if (!updateBar.hidden) updateBar.dataset.leaving = '';
+    return;
   }
+  const downloading = Number.isFinite(percent);
+  const status = $('update-message');
+  if (status.textContent !== message) status.textContent = message;
+  updateBar.classList.toggle('bad', error);
+  updateBar.toggleAttribute('data-downloading', downloading);
+  const progress = $('update-progress');
+  const counter = $('update-percent');
+  progress.hidden = counter.hidden = $('update-mark').hidden = !downloading;
+  if (downloading) {
+    progress.setAttribute('aria-valuenow', percent);
+    progress.style.setProperty('--progress', percent / 100);
+    counter.textContent = percent + '%';
+  }
+  updateBar.removeAttribute('data-leaving');
+  updateBar.hidden = false;
 }
 
 function drawUpdate() {
   const update = state.update;
-  const action = $('update-now');
   const downloading = update?.phase === 'downloading';
   const ready = update?.phase === 'ready';
-  action.hidden = !update?.version;
-  action.disabled = updateRequested || downloading;
-  action.title = downloading ? update.version + ' 업데이트 다운로드 중…' :
-    ready ? update.version + ' 업데이트 적용 및 다시 시작' :
-      update?.version ? update.version + ' 업데이트 다운로드 및 적용' : '업데이트 다운로드 및 적용';
-  action.setAttribute('aria-label', action.title);
-  notice('update-status', update?.phase === 'error' ? '업데이트 목록을 확인할 수 없습니다.' : '', true);
+  const updating = updateRequested || state.applyingUpdate;
+  const applying = ready && updating && !state.waitingForRestart;
+  const tag = update?.tag || update?.version;
+  const label = applying ? '업데이트 적용 중…' : downloading ? tag + ' 다운로드 중…' : ready ? '다시 시작할까요?' :
+    tag ? tag + ' 다운로드' : '업데이트 다운로드';
+  for (const id of ['update-now', 'signin-update-check', 'account-update-check']) {
+    const button = $(id);
+    const home = id === 'update-now';
+    if (home) button.hidden = !tag;
+    button.disabled = updating || downloading || update?.phase === 'checking' || state.connecting;
+    button.title = tag ? label : '앱 업데이트 확인';
+    button.setAttribute('aria-label', button.title);
+    const tint = tag ? '#4ade80' : '#cbd8ef';
+    const glyph = ready ? 'sync' : 'downloads';
+    if (button.dataset.tint !== tint || button.dataset.glyph !== glyph) {
+      button.replaceChildren(icon(glyph, tint));
+      button.dataset.tint = tint;
+      button.dataset.glyph = glyph;
+    }
+  }
+  const errors = {
+    connection: 'GitHub 릴리스에 연결할 수 없습니다.',
+    signature: '업데이트 서명이나 릴리스 버전이 일치하지 않습니다.',
+    rateLimit: 'GitHub 요청 한도에 도달했습니다. 잠시 후 다시 확인하세요.'
+  };
+  const messages = {
+    checking: 'GitHub에서 업데이트를 확인하는 중입니다.',
+    current: '이 채널에서 받을 수 있는 새 버전이 없습니다.',
+    missing: 'GitHub 릴리스에 설치 파일 또는 서명 목록이 빠져 있습니다.',
+    error: errors[update?.issue] || errors.connection,
+    unsupported: '이 빌드는 GitHub 자동 업데이트를 지원하지 않습니다.'
+  };
+  const message = messages[update?.phase] || (tag ? update.phase === 'available' ? tag + ' 사용 가능' : label : '');
+  const current = update?.phase === 'current';
+  const error = ['missing', 'error'].includes(update?.phase);
+  const percent = downloading ? update.percent ?? 0 : undefined;
+  const accountMessage = current ? '' : downloading ? message + ' ' + percent + '%' : message;
+  if ($('update-status').textContent !== accountMessage) notice('update-status', accountMessage, error);
+  const signinNotice = !state.connected && !state.connecting && update?.phase !== 'checking' &&
+    (!current || signinCurrentTimer) && !ready;
+  drawUpdateBar(signinNotice || downloading ? message : '', error, percent);
+  drawLoginButton();
 }
 
 function apply(next) {
   const previous = state;
   state = next;
+  $('signin-version').textContent = state.versionLabel || '';
+  if (state.connected) {
+    clearTimeout(signinCurrentTimer);
+    signinCurrentTimer = undefined;
+  }
   if (!state.connected && browserMode) resetBrowser();
   showPage();
+  if (previous?.terminalOpen && !state.terminalOpen && !$('home').hidden) {
+    document.querySelector('.tile:has(.terminal)')?.focus();
+  }
   workspaceChanged(previous);
   drawUpdate();
-  if (state.update?.phase === 'downloading' && previous?.update?.phase !== 'downloading') {
-    toast(state.update.version + ' 업데이트를 다운로드하는 중입니다.');
-  }
   if (!state.connected) {
     for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
     if (!previous || previous.connected) {
-      const form = elements('login-form');
-      form.provider.value = state.profile?.provider || 'synology';
-      form.url.value = state.profile?.url || '';
-      form.user.value = state.profile?.user || '';
-      form.password.value = '';
-      form.otp.value = '';
-      form.remember.checked = state.hasRememberedLogin;
-      filledSavedPassword = false;
-      setProvider();
+      const profile = state.nasProfiles?.find(item => item.url === state.profile?.url && item.user === state.profile?.user);
+      selectNas(profile);
     }
-    $('login-button').disabled = state.connecting;
-    $('login-button').textContent = state.connecting ? '연결 중…' : '로그인';
-    if (state.loginError) notice('login-error', state.loginError);
-    if (!previous || previous.connected || previous.connecting) void fillSavedPassword();
+    if (state.loginError && loginMode !== 'server') {
+      notice('login-error', state.loginError);
+      if (/\(DSM 40[34]\)/u.test(state.loginError)) showOtp(true);
+    }
+    savedLoginHint();
     return;
   }
-  clearSavedPassword();
+  const writes = $('account-writes');
+  writes.title = state.settings.remoteWrites ? 'NAS 쓰기 끄기' : 'NAS 쓰기 허용';
+  writes.setAttribute('aria-label', writes.title);
+  writes.setAttribute('aria-pressed', String(state.settings.remoteWrites));
+  if (browserMode) { browseButtons(); updateSelection(); }
   const signature = state.profile.provider;
   if (signature !== tileSignature) {
     drawTiles();
@@ -165,11 +318,11 @@ function apply(next) {
     last?.errors || last?.pending ? ' warn' : last?.checkedAt ? ' good' : '');
 }
 
-function tile(label, type, action) {
+function tile(label, type, action, glyph = type) {
   const item = button('', action, 'tile');
   item.title = label;
   const badge = make('span', '', 'icon ' + type);
-  badge.append(icon(type));
+  badge.append(icon(glyph));
   item.append(badge, make('span', label, 'tile-label'));
   return item;
 }
@@ -179,7 +332,7 @@ async function activate(id) {
     if (id === 'dsm') return openBrowser('remote');
     if (id === 'downloads') return openBrowser('local');
     if (id === 'sync') return openSettings();
-    if (id === 'terminal') return await showTerminal();
+    if (id === 'terminal') return await api.terminal();
     if (id === 'github') return openGithub();
   } catch (error) {
     toast(error.message);
@@ -216,20 +369,6 @@ function openSettings() {
   $('settings-dialog').showModal();
 }
 
-async function showTerminal() {
-  const dialog = $('terminal-dialog');
-  notice('terminal-status', '터미널을 연결하는 중…');
-  dialog.showModal();
-  const { openTerminal } = await import('./terminal-ui.mjs');
-  if (!dialog.open) return;
-  try {
-    await openTerminal(api, dialog, $('terminal-body'), message => notice('terminal-status', message));
-    if ($('terminal-status').textContent === '터미널을 연결하는 중…') notice('terminal-status');
-  } catch (error) {
-    if (dialog.open) notice('terminal-status', error.message, true);
-  }
-}
-
 function parentOf(path) {
   return path.slice(0, path.lastIndexOf('/')) || '/';
 }
@@ -238,7 +377,7 @@ function browseButtons() {
   const noShare = browserPath === '/' && state.profile.provider === 'synology';
   $('up-button').disabled = browserPath === '/' || transferring;
   $('refresh-button').disabled = loadingFolder || transferring;
-  $('upload-button').hidden = browserMode !== 'remote';
+  $('upload-button').hidden = browserMode !== 'remote' || !state.settings.remoteWrites;
   $('upload-button').disabled = noShare || loadingFolder || transferring;
   $('pick-button').hidden = browserMode !== 'picker';
   $('pick-button').disabled = noShare || loadingFolder || transferring;
@@ -276,22 +415,31 @@ function selectedFiles() {
 function setSelectionIcon(action, label, glyph) {
   action.title = label;
   action.setAttribute('aria-label', label);
-  if (action.dataset.glyph === glyph && action.firstChild) return;
+  if (action.dataset.glyph === glyph && action.firstChild) {
+    action.lastElementChild.textContent = label;
+    return;
+  }
   action.dataset.glyph = glyph;
-  action.replaceChildren(icon(glyph, action.classList.contains('danger') ? '#ffb2ab' : '#a9c6f8'));
+  action.replaceChildren(icon(glyph, action.classList.contains('danger') ? '#ff9c9e' : '#ecedef'), make('span', label));
 }
 
 function updateSelection() {
   const files = selectedFiles();
   const single = files.length === 1;
-  $('selection-bar').hidden = !files.length || browserMode === 'picker' || !browserMode;
+  $('selection-bar').hidden = browserMode === 'picker' || !browserMode;
   $('selection-count').textContent = files.length.toLocaleString('ko-KR') + '개 선택';
-  $('open-selection').hidden = !single;
+  $('open-selection').disabled = !single || transferring || loadingFolder;
   const folder = single && files[0].directory;
   setSelectionIcon($('open-selection'), folder ? '폴더 열기' : '미리보기', folder ? 'files' : 'eye');
   $('download-selection').hidden = browserMode !== 'remote';
-  $('delete-selection').hidden = browserMode === 'remote' && browserPath === '/' && state.profile.provider === 'synology';
-  for (const id of ['open-selection', 'download-selection', 'delete-selection']) $(id).disabled = transferring || loadingFolder;
+  $('delete-selection').hidden = browserMode === 'remote' && (!state.settings.remoteWrites ||
+    browserPath === '/' && state.profile.provider === 'synology');
+  const remote = browserMode === 'remote';
+  $('mkdir-button').hidden = !remote;
+  $('mkdir-button').disabled = !state.settings.remoteWrites || browserPath === '/' || transferring || loadingFolder;
+  for (const id of ['download-selection', 'delete-selection']) $(id).disabled = !files.length || transferring || loadingFolder;
+  $('clear-selection').disabled = !browserEntries.length || transferring || loadingFolder;
+  setSelectionIcon($('clear-selection'), files.length && files.length === browserEntries.length ? '선택 해제' : '전체 선택', 'clear');
   for (const item of $('browser-results').querySelectorAll('[data-file-path]')) {
     const active = selected.has(item.dataset.filePath);
     item.setAttribute('aria-pressed', String(active));
@@ -344,7 +492,7 @@ function openFileMenu(trigger, x, y) {
   closeFileMenu();
   if (!selected.has(file.path)) chooseFile(file, {});
   const menu = $('file-actions-menu');
-  const actions = [...$('selection-bar').querySelectorAll('button')].filter(action => !action.hidden && !action.disabled);
+  const actions = [...$('selection-bar').querySelectorAll('button[data-glyph]')].filter(action => !action.hidden && !action.disabled);
   for (const action of actions) {
     const danger = action.classList.contains('danger');
     const item = button('', () => {
@@ -565,13 +713,14 @@ async function transfer(action, progress = '파일 전송 중…') {
     else toast(error.message);
   } finally {
     transferring = false;
+    $('transfer-indicator').hidden = true;
     if (state.connected) browseButtons();
   }
 }
 
 function openEditor() {
-  $('editor-description').textContent = state.settings.remote
-    ? '같은 클라우드 폴더를 사용하는 PC에 GitHub 주소가 동기화됩니다.'
+  $('editor-description').textContent = state.settings.integrityKey
+    ? '서명 검증이 설정된 NAS 폴더에서는 서명 목록을 갱신해야 다른 PC에도 적용됩니다.'
     : '';
   elements('editor-form').github.value = state.settings.layout.links.github || '';
   notice('editor-error');
@@ -580,10 +729,16 @@ function openEditor() {
 
 document.body.dataset.platform = api.platform;
 $('sync-now').append(icon('sync', '#cbd8ef'));
+$('nas-edit').append(icon('pencil', '#cbd8ef'));
 $('update-now').append(icon('downloads', '#4ade80'));
+$('update-mark').append(icon('downloads'));
 $('edit-button').append(icon('pencil', '#cbd8ef'));
 $('account-button').append(icon('account', '#cbd8ef'));
-for (const action of $('selection-bar').querySelectorAll('button')) {
+for (const [id, glyph] of [['account-writes', 'pencil'], ['account-switch', 'switch'],
+  ['logout-button', 'logout'], ['account-settings', 'sync']]) {
+  $(id).append(icon(glyph, id === 'account-settings' ? '#fff' : '#cbd8ef'));
+}
+for (const action of $('selection-bar').querySelectorAll('button[data-glyph]')) {
   setSelectionIcon(action, action.getAttribute('aria-label'), action.dataset.glyph);
 }
 for (const [id, glyph] of [['browser-home', 'home'], ['browser-remote', 'dsm'], ['browser-local', 'downloads'],
@@ -594,34 +749,38 @@ for (const item of document.querySelectorAll('[data-close]')) {
   item.addEventListener('click', () => $(item.dataset.close).close());
 }
 const login = elements('login-form');
-login.provider.addEventListener('change', () => {
-  clearSavedPassword();
-  setProvider();
-});
-login.url.addEventListener('input', clearSavedPassword);
-login.user.addEventListener('input', clearSavedPassword);
-login.password.addEventListener('input', () => { filledSavedPassword = false; });
-login.remember.addEventListener('change', () => {
-  if (login.remember.checked && state) void fillSavedPassword();
-  else clearSavedPassword();
-});
+for (const field of [login.url, login.user, login.pin, login.password]) field.addEventListener('input', savedLoginHint);
+login.remember.addEventListener('change', savedLoginHint);
 $('login-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (!state || state.connected || $('login-form').inert || $('login-button').disabled) return;
   const form = elements('login-form');
+  let focus;
   notice('login-error');
+  loginPending = true;
+  showPage();
+  drawLoginButton();
   try {
-    apply(await api.login({
-      provider: form.provider.value, url: form.url.value, user: form.user.value,
-      password: form.password.value, otp: form.provider.value === 'synology' ? form.otp.value : '', remember: form.remember.checked
-    }));
+    const request = api.login({
+      url: form.url.value, user: form.user.value, pin: form.pin.value,
+      name: form.name.value, editId: loginMode === 'edit' ? selectedNas.id : undefined,
+      password: form.password.value, otp: form.otp.value, remember: form.remember.checked
+    });
     form.password.value = '';
     form.otp.value = '';
+    apply(await request);
   } catch (error) {
     notice('login-error', error.message);
     if (/\(DSM 40[34]\)/u.test(error.message)) {
-      $('otp-details').open = true;
-      form.otp.focus();
-    }
+      showOtp(true);
+      focus = form.otp;
+    } else focus = form.password;
+  } finally {
+    loginPending = false;
+    showPage();
+    savedLoginHint();
+    drawLoginButton();
+    if (!$('signin').hidden) focus?.focus();
   }
 });
 $('sync-now').addEventListener('click', async () => {
@@ -636,6 +795,12 @@ $('account-button').addEventListener('click', () => {
   notice('account-error');
   $('account').showModal();
 });
+$('account-writes').addEventListener('click', busy($('account-writes'), async () => {
+  notice('account-error');
+  apply(await api.remoteWrites(!state.settings.remoteWrites));
+}, error => notice('account-error', error.message, true)));
+$('account-switch').addEventListener('click', busy($('account-switch'), () => api.switchNas(),
+  error => notice('account-error', error.message, true)));
 $('account-settings').addEventListener('click', () => {
   $('account').close();
   openSettings();
@@ -643,18 +808,45 @@ $('account-settings').addEventListener('click', () => {
 $('logout-button').addEventListener('click', busy($('logout-button'), async () => {
   await api.logout();
 }, error => notice('account-error', error.message, true)));
-$('update-now').addEventListener('click', async () => {
-  if (updateRequested) return;
+async function requestUpdate() {
+  if (!state || updateRequested || state.applyingUpdate || state.connecting) return;
   updateRequested = true;
+  if (!state.connected) notice('login-error');
   drawUpdate();
   try {
     await api.installUpdate();
   } catch (error) {
-    toast(error.message);
+    if (!state.connected) notice('login-error', error.message);
+    else if ($('account').open) notice('account-error', error.message, true);
+    else toast(error.message);
   } finally {
     updateRequested = false;
     drawUpdate();
   }
+}
+$('update-now').addEventListener('click', requestUpdate);
+const signinUpdateButton = $('signin-update-check');
+signinUpdateButton.addEventListener('pointerenter', () => {
+  if (!signinUpdateButton.disabled && state?.update?.phase === 'current') showSigninCurrent();
+});
+for (const id of ['signin-update-check', 'account-update-check']) {
+  $(id).addEventListener('click', async () => {
+    if (!state || $(id).disabled) return;
+    if (['available', 'ready'].includes(state.update?.phase)) return requestUpdate();
+    try {
+      const checked = await api.checkUpdate();
+      if (id === 'signin-update-check' && !state.connected && !state.connecting &&
+          checked.update?.phase === 'current' && state.update?.phase === 'current') {
+        showSigninCurrent();
+      }
+    } catch (error) {
+      notice(id === 'signin-update-check' ? 'login-error' : 'account-error', error.message, true);
+    }
+  });
+}
+$('nas-edit').addEventListener('click', () => {
+  notice('login-error');
+  selectNas(selectedNas, { mode: loginMode === 'edit' ? 'login' : 'edit', focus: true });
 });
 
 $('pick-remote').addEventListener('click', () => openBrowser('picker', elements('settings-form').remote.value || '/'));
@@ -679,6 +871,9 @@ $('settings-form').addEventListener('submit', event => {
 $('browser-home').addEventListener('click', leaveBrowser);
 $('browser-remote').addEventListener('click', () => { if (browserMode !== 'remote') openBrowser('remote'); });
 $('browser-local').addEventListener('click', () => { if (browserMode !== 'local') openBrowser('local'); });
+$('browser-results').addEventListener('click', event => {
+  if (!transferring && selected.size && !event.target.closest('.file-card, tr, button')) clearSelection();
+});
 $('browser-results').addEventListener('contextmenu', event => {
   const trigger = event.target.closest('[data-file-path]') ||
     event.target.closest('tr, .file-card')?.querySelector('[data-file-path]');
@@ -726,7 +921,25 @@ $('preview-dialog').addEventListener('close', () => {
   $('preview-body').replaceChildren();
   $('preview-controls').replaceChildren();
 });
-$('clear-selection').addEventListener('click', clearSelection);
+$('clear-selection').addEventListener('click', () => {
+  if (selected.size === browserEntries.length) return clearSelection();
+  selected = new Set(browserEntries.map(entry => entry.path));
+  updateSelection();
+});
+$('mkdir-button').addEventListener('click', () => {
+  $('mkdir-form').reset();
+  notice('mkdir-error');
+  $('mkdir-dialog').showModal();
+});
+$('mkdir-form').addEventListener('submit', event => {
+  event.preventDefault();
+  void busy(event.submitter, async () => {
+    if (await api.mkdir(browserPath, elements('mkdir-form').name.value)) {
+      $('mkdir-dialog').close();
+      void loadFolder(browserPath);
+    }
+  }, error => notice('mkdir-error', error.message, true))();
+});
 $('open-selection').addEventListener('click', () => { void openEntry(selectedFiles()[0]); });
 $('download-selection').addEventListener('click', () => {
   const items = selectedFiles().map(file => file.path);
@@ -835,6 +1048,31 @@ $('editor-form').addEventListener('submit', event => {
   }, error => notice('editor-error', error.message, true))();
 });
 
+$('transfer-button').append(icon('up', '#ecedef'));
+api.onTransfer(info => {
+  if (!transferring || browserMode !== 'remote') return;
+  $('transfer-indicator').hidden = false;
+  const button = $('transfer-button');
+  if (button.dataset.direction !== info.direction) {
+    button.replaceChildren(icon(info.direction === 'upload' ? 'up' : 'downloads', '#ecedef'));
+    button.dataset.direction = info.direction;
+  }
+  $('transfer-title').textContent = info.direction === 'upload' ? '파일 업로드 중' : '파일 다운로드 중';
+  $('transfer-name').textContent = info.name;
+  const meter = $('transfer-progress');
+  const percent = info.total === null ? null : info.total === 0 ? 100 : Math.min(100, Math.round(info.bytes / info.total * 100));
+  button.style.setProperty('--transfer-progress', (percent ?? 0) + '%');
+  if (percent === null) meter.removeAttribute('value');
+  else meter.value = percent;
+  $('transfer-details').textContent = (percent === null ? bytes(info.bytes) : percent + '%') + ' · ' + bytes(info.rate) + '/s';
+});
+
 initWorkspace();
 api.onState(apply);
-api.state().then(apply).catch(error => notice('login-error', error.message));
+api.state().then(apply).catch(error => {
+  if (state) return;
+  $('signin-loading').hidden = true;
+  $('login-form').inert = false;
+  $('login-button').disabled = true;
+  notice('login-error', error.message);
+});

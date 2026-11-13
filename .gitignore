@@ -4,3 +4,8 @@ dist/
 .sonac-update-key.pem
 .sonac-update-url
 .sonac-key-*/
+nas-signing.pem
+
+.tauri-preview-ui/
+tauri-preview/target/
+tauri-preview/gen/

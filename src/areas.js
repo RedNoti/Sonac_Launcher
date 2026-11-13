@@ -1,12 +1,16 @@
 'use strict';
 
+const { httpsFetch } = require('./transport');
+
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createWriteStream } = require('node:fs');
 const { pipeline } = require('node:stream/promises');
+const { Transform } = require('node:stream');
 const { unzipSync } = require('fflate/browser');
 const { sha256 } = require('./update-manifest');
-const { getStat, safeDirectory } = require('./sync');
+const { getStat, guardedFolder } = require('./sync');
+const { safeName: fileName } = require('./nas-integrity');
 const github = require('./github');
 
 const maxZip = 64 * 1024 * 1024;
@@ -22,20 +26,11 @@ function httpsLink(value) {
   return url;
 }
 
-function fileName(name) {
-  if (typeof name !== 'string' || !name || ['.', '..', '.git'].includes(name.toLowerCase()) ||
-      /[<>:"/\\|?*\u0000-\u001f]|[. ]$/u.test(name) ||
-      /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/iu.test(name)) {
-    throw new Error('저장할 수 없는 파일 이름이 있습니다.');
-  }
-  return name;
-}
-
 async function linkResponse(value, signal) {
   let url = httpsLink(value);
   const timeout = AbortSignal.any([signal, AbortSignal.timeout(30 * 60 * 1000)]);
   for (let redirect = 0; redirect < 6; redirect++) {
-    const response = await fetch(url, { redirect: 'manual', cache: 'no-store', signal: timeout });
+    const response = await httpsFetch(url, { redirect: 'manual', cache: 'no-store', signal: timeout });
     if (response.ok && response.status === 200 && response.body) return response;
     await response.body?.cancel();
     const location = response.headers.get('location');
@@ -90,13 +85,8 @@ async function stageArchive(response, directory, signal) {
 
 async function destinationFor(root, name) {
   const parts = name.split('/');
-  const leaf = parts.pop();
-  let folder = root;
-  for (const part of parts) {
-    folder = path.join(folder, part);
-    await safeDirectory(folder);
-  }
-  const destination = path.join(folder, leaf);
+  const destination = path.join(root, ...parts.map(fileName));
+  await guardedFolder(root, path.dirname(destination), true);
   const info = await getStat(destination);
   if (info && !info.isFile()) throw new Error('파일 위치에 같은 이름의 폴더 또는 링크가 있습니다. · ' + name);
   return { destination, info };
@@ -140,6 +130,7 @@ async function applyFiles(root, directory, plan, signal) {
 }
 
 async function syncExternal(area, root, { token, signal }) {
+  await guardedFolder(root, root);
   const directory = await fs.mkdtemp(path.join(root, '.sonac-stage-'));
   let keepBackup = false;
   try {
@@ -153,7 +144,18 @@ async function syncExternal(area, root, { token, signal }) {
     } else {
       const response = await linkResponse(area.url, signal);
       const staged = path.join(directory, 'file-0');
-      await pipeline(response.body, createWriteStream(staged, { flags: 'wx', mode: 0o600 }), { signal });
+      let size = 0;
+      const limit = new Transform({
+        transform(chunk, _encoding, callback) {
+          size += chunk.length;
+          if (size > 64 * 1024 ** 3) return callback(new Error('HTTPS 링크 파일은 64 GiB까지 받을 수 있습니다.'));
+          callback(null, chunk);
+        }
+      });
+      await pipeline(response.body, limit, createWriteStream(staged, { flags: 'wx', mode: 0o600 }), { signal });
+      if (area.sha256 && await sha256(staged) !== area.sha256) {
+        throw new Error('HTTPS 파일의 SHA-256이 설정한 값과 다릅니다.');
+      }
       plan = [{ name: area.filename, staged }];
     }
     const downloaded = await applyFiles(root, directory, plan, signal);

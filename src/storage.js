@@ -1,14 +1,25 @@
 'use strict';
 
+const { httpsFetch, pinnedDispatcher } = require('./transport');
+
 const { randomUUID } = require('node:crypto');
 const { openAsBlob } = require('node:fs');
 const { SaxesParser } = require('saxes');
+
+const networkCodes = new Set(['SONAC_NETWORK', 'EAI_AGAIN', 'ENOTFOUND', 'ENETUNREACH', 'ENETDOWN',
+  'EHOSTUNREACH', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET']);
+
+function networkFailure(error) {
+  return networkCodes.has(error?.code) || networkCodes.has(error?.cause?.code);
+}
 
 const APIS = {
   auth: 'SYNO.API.Auth',
   list: 'SYNO.FileStation.List',
   download: 'SYNO.FileStation.Download',
   upload: 'SYNO.FileStation.Upload',
+  mkdir: 'SYNO.FileStation.CreateFolder',
   delete: 'SYNO.FileStation.Delete'
 };
 const DSM_ERRORS = {
@@ -33,7 +44,7 @@ const DSM_ERRORS = {
 };
 
 function remotePath(value) {
-  if (typeof value !== 'string' || !value.startsWith('/') || /[\u0000-\u001f\u007f]/u.test(value)) {
+  if (typeof value !== 'string' || value.length > 4096 || !value.startsWith('/') || /[\\\u0000-\u001f\u007f]/u.test(value)) {
     throw new Error('저장소 경로가 올바르지 않습니다.');
   }
   const segments = value.replace(/\/$/u, '').split('/').slice(1);
@@ -52,10 +63,12 @@ function childPath(parent, name) {
 
 function endpoint(value, provider) {
   let url;
+  const address = value.trim();
+  const hostOnly = provider === 'synology' && /^(?:\[[\da-f:.]+\]|[^\s/:@?#\\]+)(?::\d+)?\/?$/iu.test(address);
   try {
-    url = new URL(value.trim());
+    url = new URL(hostOnly ? 'https://' + address : address);
   } catch {
-    throw new Error('https://로 시작하는 저장소 주소를 입력하세요.');
+    throw new Error('저장소의 호스트 이름 또는 HTTPS 주소를 입력하세요.');
   }
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error('계정 정보, 쿼리, 해시를 제외한 HTTPS 주소를 입력하세요.');
@@ -69,7 +82,7 @@ function endpoint(value, provider) {
 async function request(url, options = {}, signal, timeout = 30000) {
   const limit = AbortSignal.timeout(timeout);
   try {
-    const response = await fetch(url, {
+    const response = await httpsFetch(url, {
       ...options, redirect: 'manual', cache: 'no-store',
       signal: signal ? AbortSignal.any([signal, limit]) : limit
     });
@@ -80,12 +93,17 @@ async function request(url, options = {}, signal, timeout = 30000) {
     return response;
   } catch (error) {
     if (signal?.aborted) throw signal.reason;
-    if (limit.aborted) throw new Error('저장소 응답 시간이 초과됐습니다.');
+    if (limit.aborted) throw Object.assign(new Error('저장소 응답 시간이 초과됐습니다.'), { code: 'SONAC_NETWORK' });
     const code = error.cause?.code;
+    if (code === 'SONAC_CERT_PIN') throw new Error('NAS 인증서 공개 키가 등록한 값과 다릅니다.');
     if (code?.includes('CERT') || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
       throw new Error('서버의 TLS 인증서를 확인할 수 없습니다. 인증서에 등록된 도메인과 신뢰 체인을 확인하세요.');
     }
-    if (error instanceof TypeError) throw new Error('저장소에 연결할 수 없습니다. 주소, 포트, 네트워크를 확인하세요.');
+    if (error instanceof TypeError) {
+      const failure = new Error('저장소에 연결할 수 없습니다. 주소, 포트, 네트워크를 확인하세요.');
+      if (networkFailure(error)) failure.code = 'SONAC_NETWORK';
+      throw failure;
+    }
     throw error;
   }
 }
@@ -105,11 +123,27 @@ async function checked(response) {
   throw new Error(`${errors[response.status] || '저장소 요청에 실패했습니다.'} (HTTP ${response.status})`);
 }
 
+async function responseText(response, limit = 8 * 1024 * 1024) {
+  if (!response.body) throw new Error('서버 응답이 비어 있습니다.');
+  let length = 0;
+  const chunks = [];
+  for await (const chunk of response.body) {
+    length += chunk.length;
+    if (length > limit) throw new Error('서버 응답이 너무 큽니다.');
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks, length).toString('utf8');
+}
+
 async function dsmJSON(response, phase = '') {
   await checked(response);
-  const payload = await response.json().catch(() => {
+  const content = await responseText(response);
+  let payload;
+  try {
+    payload = JSON.parse(content);
+  } catch {
     throw new Error('DSM API 응답을 읽을 수 없습니다. DSM 직접 접속 주소를 확인하세요.');
-  });
+  }
   if (payload?.success === true) return payload.data;
   const code = Number(payload?.error?.code);
   const message = Number.isInteger(code)
@@ -121,7 +155,7 @@ async function dsmJSON(response, phase = '') {
 }
 
 function dsmSession(response, data) {
-  const validId = value => typeof value === 'string' && /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]+$/u.test(value);
+  const validId = value => typeof value === 'string' && /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,1024}$/u.test(value);
   const cookieId = response.headers.getSetCookie()
     .map(cookie => /^id=([^;]*)/u.exec(cookie)?.[1].trim().replace(/^"([^"]*)"$/u, '$1'))
     .find(validId);
@@ -129,7 +163,10 @@ function dsmSession(response, data) {
   if (!validId(id)) throw new Error('DSM 로그인 응답에서 세션 ID를 받을 수 없습니다.');
   const headers = { Cookie: 'id=' + id };
   const parameters = {};
-  if (typeof data?.synotoken === 'string' && data.synotoken) {
+  if (data?.synotoken) {
+    if (typeof data.synotoken !== 'string' || !/^[\x21-\x7e]{1,1024}$/u.test(data.synotoken)) {
+      throw new Error('DSM 로그인 응답에서 올바른 요청 토큰을 받을 수 없습니다.');
+    }
     headers['X-SYNO-TOKEN'] = data.synotoken;
     parameters.SynoToken = data.synotoken;
   }
@@ -139,6 +176,7 @@ function dsmSession(response, data) {
 class Synology {
   constructor(profile) {
     this.profile = profile;
+    this.dispatcher = pinnedDispatcher(profile.pin);
     this.methods = {};
     this.session = null;
   }
@@ -148,15 +186,16 @@ class Synology {
     infoURL.search = new URLSearchParams({
       api: 'SYNO.API.Info', version: '1', method: 'query', query: Object.values(APIS).join(',')
     });
-    const info = await dsmJSON(await request(infoURL, {}, signal), 'DSM API 조회');
-    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2 };
+    const info = await dsmJSON(await request(infoURL, { dispatcher: this.dispatcher }, signal), 'DSM API 조회');
+    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2, mkdir: 2 };
     delete this.methods.delete;
+    delete this.methods.mkdir;
     for (const [type, api] of Object.entries(APIS)) {
       const entry = info?.[api];
       const version = Math.max(Number(entry?.minVersion), Math.min(supported[type], Number(entry?.maxVersion)));
       if (!/^(?:[\w-]+\/)*[\w.-]+\.cgi$/u.test(entry?.path || '') || !Number.isInteger(version) ||
           version > Number(entry.maxVersion) || (type !== 'auth' && version < 2)) {
-        if (type === 'delete') continue;
+        if (type === 'delete' || type === 'mkdir') continue;
         throw new Error('DSM File Station API를 찾을 수 없습니다. NAS에서 File Station 패키지 상태를 확인하세요.');
       }
       this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, this.profile.url) };
@@ -192,7 +231,7 @@ class Synology {
   post(type, method, values, signal, timeout) {
     const session = type === 'auth' && method === 'login' ? null : this.session;
     return request(this.methods[type].url, {
-      method: 'POST', headers: session?.headers,
+      method: 'POST', headers: session?.headers, dispatcher: this.dispatcher,
       body: new URLSearchParams(this.parameters(type, method, values, session))
     }, signal, timeout);
   }
@@ -219,8 +258,8 @@ class Synology {
         });
       }
       offset += rows.length;
+      if (offset > 50000) throw new Error('DSM 파일 목록이 너무 큽니다.');
       if (!rows.length || offset >= Number(data.total ?? offset)) break;
-      if (offset > 1000000) throw new Error('DSM 파일 목록이 너무 큽니다.');
     } while (true);
     return entries;
   }
@@ -237,13 +276,14 @@ class Synology {
     return response;
   }
 
-  async upload(folder, name, content, { overwrite = false, signal } = {}) {
+  async upload(folder, name, content, { overwrite = false, signal, progress } = {}) {
     childPath(folder, name);
     if (/["\\\r\n]/u.test(name)) throw new Error('DSM에 업로드할 수 없는 파일 이름입니다.');
     const fields = this.parameters('upload', 'upload', {
       path: remotePath(folder), create_parents: 'false'
     });
     if (overwrite) fields.overwrite = fields.version === '2' ? 'true' : 'overwrite';
+    // Omitting overwrite makes DSM return a conflict instead of silently skipping the upload.
     const boundary = randomUUID();
     const preamble = Buffer.from(Object.entries(fields).map(([key, value]) =>
       `--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${value}\r\n`
@@ -251,17 +291,31 @@ class Synology {
     const ending = Buffer.from(`\r\n--${boundary}--\r\n`);
     async function* parts() {
       yield preamble;
-      yield* content.stream();
+      let sent = 0;
+      progress?.(name, sent, content.size);
+      for await (const chunk of content.stream()) {
+        yield chunk;
+        sent += chunk.length;
+        progress?.(name, sent, content.size);
+      }
       yield ending;
     }
     await dsmJSON(await request(this.methods.upload.url, {
-      method: 'POST', duplex: 'half', body: parts(),
+      method: 'POST', duplex: 'half', body: parts(), dispatcher: this.dispatcher,
       headers: {
         ...this.session?.headers,
         'Content-Type': 'multipart/form-data; boundary=' + boundary,
         'Content-Length': String(preamble.length + content.size + ending.length)
       }
     }, signal, 3600000));
+  }
+
+  async mkdir(folder, name, signal) {
+    if (!this.methods.mkdir) throw new Error('이 NAS에서 폴더 만들기를 사용할 수 없습니다.');
+    childPath(folder, name);
+    await dsmJSON(await this.post('mkdir', 'create', {
+      folder_path: JSON.stringify([remotePath(folder)]), name: JSON.stringify([name])
+    }, signal));
   }
 
   async delete(entry, signal) {
@@ -333,6 +387,7 @@ class WebDAV {
   constructor(profile) {
     this.profile = profile;
     this.base = new URL(profile.url);
+    this.dispatcher = pinnedDispatcher(profile.pin);
   }
 
   async connect(secret, _otp, _remember, signal) {
@@ -349,7 +404,7 @@ class WebDAV {
 
   send(url, options, signal, timeout) {
     return request(url, {
-      ...options, headers: { Authorization: this.authorization, ...options.headers }
+      ...options, headers: { Authorization: this.authorization, ...options.headers }, dispatcher: this.dispatcher
     }, signal, timeout).then(checked);
   }
 
@@ -367,7 +422,7 @@ class WebDAV {
     const files = [];
     let collection = false;
     const parent = decodeURIComponent(url.pathname);
-    for (const row of davResponses(await response.text())) {
+    for (const row of davResponses(await responseText(response))) {
       if (!row.href || !row.properties.hasType) continue;
       const href = new URL(row.href, url);
       if (href.origin !== url.origin || href.search || href.hash) continue;
@@ -418,4 +473,4 @@ function storage(profile) {
   return profile.provider === 'synology' ? new Synology(profile) : new WebDAV(profile);
 }
 
-module.exports = { storage, endpoint, remotePath, childPath, openAsBlob };
+module.exports = { storage, endpoint, remotePath, childPath, openAsBlob, networkFailure };

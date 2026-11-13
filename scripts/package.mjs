@@ -7,17 +7,21 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import asar from '@electron/asar';
+import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
+import { writeExecutableIcon, writeMsiSource, writeShortcutProperties } from './windows-msi.mjs';
+import { macSigningConfiguration, signMacBundle, notarizeMacImage } from './mac-sign.mjs';
 
 const require = createRequire(import.meta.url);
 const root = fileURLToPath(new URL('..', import.meta.url));
 const manifest = require('../package.json');
 const electronVersion = require('electron/package.json').version;
 const checksums = require('electron/checksums.json');
-const { manifestBytes, sha256 } = require('../src/update-manifest');
+const { compareVersions, manifestBytes, sha256, releaseChannels, releaseVersion } = require('../src/update-manifest');
 const [target, requestedArch] = process.argv.slice(2);
 const arch = requestedArch || (target === 'win' ? 'x64' : process.arch);
 const appName = manifest.productName;
 const appId = 'kr.sonac.launcher';
+const version = manifest.releaseVersion ?? manifest.version;
 
 if (!['mac', 'win'].includes(target) || !['arm64', 'x64'].includes(arch) ||
     (target === 'win' && arch !== 'x64') || (target === 'mac' && process.platform !== 'darwin')) {
@@ -27,10 +31,20 @@ if (!['mac', 'win'].includes(target) || !['arm64', 'x64'].includes(arch) ||
 const dist = path.join(root, 'dist');
 const work = await fs.mkdtemp(path.join(os.tmpdir(), 'sonac-package-'));
 const installerPrefix = manifest.name + '-';
-const installerSuffix = target === 'mac' ? '-mac-' + arch + '.dmg' : '-win-x64-setup.exe';
-const installerName = installerPrefix + manifest.version + installerSuffix;
-const releaseVersion = /^\d+\.\d+\.\d+$/u;
+const installerSuffix = target === 'mac' ? '-mac-' + arch + '.dmg' : '-win-x64.msi';
+const installerName = installerPrefix + version + installerSuffix;
+const versionFromFilename = filename => filename.slice(installerPrefix.length, -installerSuffix.length);
+const isRelease = releaseVersion.test(version);
 const updateTarget = target === 'mac' && arch !== 'arm64' ? null : target + '-' + arch;
+const updateChannel = process.env.SONAC_RELEASE_CHANNEL ?? 'R';
+if (!releaseChannels.includes(updateChannel)) throw new Error('배포 채널은 a, b, R 중 하나여야 합니다.');
+const fuses = {
+  version: FuseVersion.V1,
+  [FuseV1Options.RunAsNode]: false,
+  [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+  [FuseV1Options.EnableNodeCliInspectArguments]: false,
+  [FuseV1Options.OnlyLoadAppFromAsar]: true
+};
 
 function command(executable, args, opts = {}) {
   const result = spawnSync(executable, args, { stdio: 'inherit', encoding: 'utf8', ...opts });
@@ -75,27 +89,12 @@ async function releaseKey() {
   }
 }
 
-async function updateFeed() {
-  const configured = process.env.SONAC_UPDATE_URL ?? await fs.readFile(path.join(root, '.sonac-update-url'), 'utf8')
-    .catch(error => {
-      if (error.code !== 'ENOENT') throw error;
-      return '';
-    });
-  if (!configured.trim()) return undefined;
-  const url = new URL(configured.trim());
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
-    throw new Error('업데이트 서버에는 계정 정보가 없는 HTTPS 폴더 주소를 사용하세요.');
-  }
-  if (!url.pathname.endsWith('/')) url.pathname += '/';
-  return url.href;
-}
-
-async function applicationArchive(key, updateURL) {
+async function applicationArchive(key, updateRepository) {
   const source = path.join(work, 'source');
   await fs.mkdir(path.join(source, 'node_modules'), { recursive: true });
   await fs.cp(path.join(root, 'src'), path.join(source, 'src'), { recursive: true });
   await fs.rm(path.join(source, 'src', 'ui', 'app.ico'));
-  for (const name of ['saxes', 'xmlchars']) {
+  for (const name of ['saxes', 'xmlchars', 'undici']) {
     await fs.cp(path.join(root, 'node_modules', name), path.join(source, 'node_modules', name), { recursive: true });
   }
   const vendor = path.join(source, 'node_modules');
@@ -119,7 +118,8 @@ async function applicationArchive(key, updateURL) {
     }
   }
   await fs.writeFile(path.join(source, 'package.json'), JSON.stringify({
-    name: manifest.name, productName: appName, version: manifest.version, main: manifest.main, updateURL,
+    name: manifest.name, productName: appName, version: manifest.version, releaseVersion: version,
+    main: manifest.main, updateRepository, updateChannel,
     updatePublicKey: key ? createPublicKey(key).export({ type: 'spki', format: 'der' }).toString('base64') : undefined
   }));
   const filename = path.join(work, 'app.asar');
@@ -153,6 +153,7 @@ async function stageTerminal(resources) {
 }
 
 async function packageMac(extracted, archive, output) {
+  const signing = macSigningConfiguration();
   const stage = path.join(work, 'image');
   await fs.mkdir(stage);
   const bundle = path.join(stage, appName + '.app');
@@ -164,6 +165,7 @@ async function packageMac(extracted, archive, output) {
   plist(info, 'CFBundleName', appName);
   plist(info, 'CFBundleDisplayName', appName);
   plist(info, 'CFBundleExecutable', appName);
+  plist(info, 'CFBundleIconFile', 'SonacLauncher.icns');
   plist(info, 'CFBundleShortVersionString', manifest.version);
   plist(info, 'CFBundleVersion', manifest.version);
   await fs.rename(path.join(contents, 'MacOS', 'Electron'), path.join(contents, 'MacOS', appName));
@@ -185,28 +187,16 @@ async function packageMac(extracted, archive, output) {
   await fs.copyFile(archive, path.join(resources, 'app.asar'));
   await stageTerminal(resources);
   await fs.rm(path.join(resources, 'default_app.asar'), { force: true });
-  command('/usr/bin/sips', ['-s', 'format', 'icns', path.join(root, 'src', 'ui', 'app.png'),
-    '--out', path.join(resources, 'electron.icns')]);
-  command('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', bundle]);
+  await fs.rm(path.join(resources, 'electron.icns'), { force: true });
+  command('/usr/bin/sips', ['-s', 'format', 'icns', path.join(root, 'src', 'ui', 'dock.png'),
+    '--out', path.join(resources, 'SonacLauncher.icns')]);
+  await flipFuses(bundle, fuses);
+  await signMacBundle(bundle, work, arch, signing, command);
   command('/usr/bin/codesign', ['--verify', '--deep', '--strict', bundle]);
   await fs.symlink('/Applications', path.join(stage, 'Applications'));
   command('/usr/bin/hdiutil', ['create', '-ov', '-volname', appName, '-srcfolder', stage, '-format', 'UDZO', output]);
+  notarizeMacImage(output, signing, command);
   command('/usr/bin/hdiutil', ['verify', output]);
-}
-
-async function uninstallEntries(directory, prefix = '') {
-  const lines = [];
-  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-    const filename = prefix + '\\' + entry.name;
-    if (/["$\r\n]/u.test(filename)) throw new Error('NSIS 파일 경로가 올바르지 않습니다.');
-    if (entry.isDirectory()) {
-      lines.push(...await uninstallEntries(path.join(directory, entry.name), filename));
-      lines.push('RMDir "$INSTDIR' + filename + '"');
-    } else {
-      lines.push('Delete "$INSTDIR' + filename + '"');
-    }
-  }
-  return lines;
 }
 
 async function packageWindows(extracted, archive, output) {
@@ -214,36 +204,43 @@ async function packageWindows(extracted, archive, output) {
   await fs.copyFile(archive, path.join(resources, 'app.asar'));
   await stageTerminal(resources);
   await fs.rm(path.join(resources, 'default_app.asar'), { force: true });
-  await fs.rename(path.join(extracted, 'electron.exe'), path.join(extracted, appName + '.exe'));
+  const executable = path.join(extracted, appName + '.exe');
+  await fs.rename(path.join(extracted, 'electron.exe'), executable);
   const icon = path.join(root, 'src', 'ui', 'app.ico');
+  await writeExecutableIcon(executable, icon);
+  await flipFuses(executable, fuses);
   await fs.copyFile(icon, path.join(extracted, 'SonacLauncher.ico'));
-  const uninstall = path.join(work, 'uninstall.nsh');
-  await fs.writeFile(uninstall, (await uninstallEntries(extracted)).join('\n') + '\n');
-  const define = process.platform === 'win32' ? '/D' : '-D';
-  command(process.env.MAKENSIS || 'makensis', [
-    define + 'SOURCE=' + extracted, define + 'OUTPUT=' + output, define + 'APPICON=' + icon,
-    define + 'APPVERSION=' + manifest.version, define + 'UNINSTALL_FILES=' + uninstall,
-    path.join(root, 'scripts', 'installer.nsi')
-  ]);
+  const source = path.join(work, 'installer.wxs');
+  await writeMsiSource(extracted, source, { name: appName, version: manifest.version });
+  command(process.env.WIXL || 'wixl', ['-a', 'x64', '-o', output, source], { cwd: extracted });
+  const shortcutProperties = path.join(work, 'MsiShortcutProperty.idt');
+  await writeShortcutProperties(shortcutProperties, appId);
+  command(process.env.MSIBUILD || 'msibuild', [output, '-i', shortcutProperties]);
 }
 
 async function retainLatestInstaller() {
-  if (!releaseVersion.test(manifest.version)) return path.join(dist, installerName);
+  if (!isRelease) return path.join(dist, installerName);
   const installers = (await fs.readdir(dist, { withFileTypes: true }))
     .filter(entry => entry.isFile() && entry.name.startsWith(installerPrefix) &&
-      entry.name.endsWith(installerSuffix) &&
-      releaseVersion.test(entry.name.slice(installerPrefix.length, -installerSuffix.length)))
+      (entry.name.endsWith(installerSuffix) &&
+      releaseVersion.test(versionFromFilename(entry.name))))
     .map(entry => entry.name)
-    .sort((first, second) => second.localeCompare(first, 'en', { numeric: true }));
+    .sort((first, second) => compareVersions(versionFromFilename(second), versionFromFilename(first)));
   const [latest, ...previous] = installers;
   for (const filename of previous) await fs.rm(path.join(dist, filename), { force: true });
+  if (target === 'win' && latest === installerName) {
+    const legacy = /^sonac_launcher-\d+\.\d+\.\d+-win-x64-setup\.exe$/u;
+    for (const entry of await fs.readdir(dist, { withFileTypes: true })) {
+      if (entry.isFile() && legacy.test(entry.name)) await fs.rm(path.join(dist, entry.name));
+    }
+  }
   return path.join(dist, latest || installerName);
 }
 
 async function publishUpdate(installer, key, staging) {
   const record = {
-    version: manifest.version, target: updateTarget, filename: installerName,
-    size: (await fs.stat(installer)).size, sha256: await sha256(installer)
+    version, target: updateTarget, filename: installerName,
+    size: (await fs.stat(installer)).size, sha256: await sha256(installer), channel: updateChannel
   };
   const signature = sign(null, manifestBytes(record), key).toString('base64');
   const name = 'latest-' + updateTarget + '.json';
@@ -261,9 +258,10 @@ try {
   if (target === 'mac') command('/usr/bin/ditto', ['-x', '-k', zip, extracted]);
   else if (process.platform === 'win32') command('tar', ['-xf', zip, '-C', extracted]);
   else command('unzip', ['-q', zip, '-d', extracted]);
-  const updateURL = updateTarget && releaseVersion.test(manifest.version) ? await updateFeed() : undefined;
-  const key = updateURL ? await releaseKey() : null;
-  const archive = await applicationArchive(key, updateURL);
+  const updateRepository = process.env.SONAC_RELEASE_REPOSITORY ?? 'RedNoti/sonac_launcher';
+  if (!/^[a-z0-9-]+\/[a-z0-9_.-]+$/iu.test(updateRepository)) throw new Error('GitHub 저장소는 OWNER/REPO 형식이어야 합니다.');
+  const key = updateTarget && isRelease ? await releaseKey() : null;
+  const archive = await applicationArchive(key, updateRepository);
   staging = await fs.mkdtemp(path.join(dist, '.package-'));
   const output = path.join(staging, installerName);
   if (target === 'mac') await packageMac(extracted, archive, output);

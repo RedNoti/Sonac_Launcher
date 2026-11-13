@@ -1,0 +1,16 @@
+{
+  "productName": "sonac launcher Tauri preview",
+  "version": "0.2.0",
+  "identifier": "kr.sonac.launcher.preview",
+  "build": { "frontendDist": "../.tauri-preview-ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "title": "sonac launcher · Tauri 미리보기", "width": 1120, "height": 820 }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": { "active": false, "icon": ["../src/ui/app.png", "../src/ui/app.ico"] }
+}
