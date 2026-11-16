@@ -1,7 +1,7 @@
 {
   "name": "sonac_launcher",
   "productName": "sonac launcher",
-  "version": "0.3.20",
+  "version": "0.3.21",
   "description": "Windows와 macOS용 개인 파일 런처",
   "main": "src/main.js",
   "private": true,
@@ -29,5 +29,5 @@
     "electron": "44.11.2",
     "resedit": "3.1.0"
   },
-  "releaseVersion": "0.3.6.3"
+  "releaseVersion": "0.3.7"
 }
