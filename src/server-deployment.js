@@ -45,19 +45,25 @@ async function releaseAssets(source, signal, token = process.env.SONAC_RELEASE_G
   const [owner, repository, , kind, value, directName] = new URL(source).pathname.slice(1).replace(/\/$/u, '').split('/');
   const repo = gitApi + '/repos/' + owner + '/' + repository;
   const tag = ['tag', 'download'].includes(kind) ? decodeURIComponent(value) : null;
-  const endpoint = tag ? '/releases/tags/' + encodeURIComponent(tag) : '/releases/latest';
-  const options = { redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) };
+  const endpoint = tag ? '/releases/tags/' + encodeURIComponent(tag)
+    : kind === 'latest' ? '/releases/latest' : '/releases?per_page=30';
+  const options = { redirect: 'error', cache: 'no-store', signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) };
   const url = repo + endpoint;
   const response = await httpsFetch(url, { ...options, headers: githubHeaders(url, 'application/vnd.github+json', token) });
-  const release = JSON.parse(await readBody(response, 4 * 1024 ** 2));
+  const result = JSON.parse(await readBody(response, 4 * 1024 ** 2));
+  const releases = Array.isArray(result)
+    ? result.filter(release => !release.draft).sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))
+    : [result];
   const name = kind === 'download' ? directName : value === 'download' ? directName : null;
-  const assets = release.assets.filter(asset => asset.state === 'uploaded' && /\.zip$/iu.test(asset.name) &&
-    (!name || asset.name === decodeURIComponent(name)));
+  const assets = releases.flatMap(release => release.assets
+    .filter(asset => asset.state === 'uploaded' && /\.zip$/iu.test(asset.name) &&
+      (!name || asset.name === decodeURIComponent(name)))
+    .map(asset => ({
+      id: asset.id, name: asset.name, size: asset.size, tag: release.tag_name, digest: asset.digest,
+      url: repo + '/releases/assets/' + asset.id
+    })));
   if (!assets.length) throw new Error('GitHub 릴리스의 Assets에 배포용 ZIP 파일을 올려주세요.');
-  return assets.map(asset => ({
-    id: asset.id, name: asset.name, size: asset.size, tag: release.tag_name, digest: asset.digest,
-    url: repo + '/releases/assets/' + asset.id
-  }));
+  return assets;
 }
 
 async function downloadAsset(asset, signal, token = process.env.SONAC_RELEASE_GITHUB_TOKEN) {

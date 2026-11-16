@@ -1093,6 +1093,7 @@ async function deployRelease(project, assetId) {
     const assets = await deployment.releaseAssets(releaseFileUrl(file.url), signal, token);
     const asset = assets.find(item => item.id === assetId);
     if (!asset) throw new Error('릴리스가 바뀌었습니다. 배포 파일을 다시 선택하세요.');
+    runtime.log = (runtime.log + '\n[런처] 배포 ZIP ' + asset.tag + ' · ' + asset.name + '\n').slice(-96000);
     const bytes = await deployment.downloadAsset(asset, signal, token);
     runtime.phase = 'extracting';
     publish();
