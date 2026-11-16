@@ -1088,18 +1088,22 @@ async function deployRelease(project, assetId) {
   const stage = path.join(root, version);
   let stoppedPrevious = false;
   let starting = false;
+  let tag;
+  const log = message => deployment.appendLog(runtime, '\n[런처] ' + message + '\n');
   try {
     const token = await serverGitHubToken(session);
     const assets = await deployment.releaseAssets(releaseFileUrl(file.url), signal, token);
     const asset = assets.find(item => item.id === assetId);
     if (!asset) throw new Error('릴리스가 바뀌었습니다. 배포 파일을 다시 선택하세요.');
-    runtime.log = (runtime.log + '\n[런처] 배포 ZIP ' + asset.tag + ' · ' + asset.name + '\n').slice(-96000);
+    tag = asset.tag;
+    log('배포 ZIP ' + tag + ' · ' + asset.name);
     const bytes = await deployment.downloadAsset(asset, signal, token);
     runtime.phase = 'extracting';
     publish();
     await fs.mkdir(data, { recursive: true, mode: 0o700 });
     await fs.mkdir(stage, { mode: 0o700 });
     await deployment.extractZip(bytes, stage, signal);
+    log(tag + ' ZIP을 새 배포 폴더에 풀었습니다.');
     const spec = await deployment.launchSpec(stage);
     signal.throwIfAborted();
     if (runtime.child) {
@@ -1112,7 +1116,10 @@ async function deployRelease(project, assetId) {
     signal.throwIfAborted();
     file.deployment = { version, tag: asset.tag };
     await persist();
+    log(tag + ' 배포 완료');
   } catch (error) {
+    const message = (tag ? tag + ' 배포 실패' : '배포 실패') + ' · ' + displayError(error);
+    log(message);
     file.deployment = previous;
     if (starting) await deployment.stopProcess(runtime).catch(() => {});
     if (!runtime.child || !starting) await fs.rm(stage, { force: true, recursive: true }).catch(() => {});
@@ -1121,11 +1128,15 @@ async function deployRelease(project, assetId) {
       try {
         const spec = await deployment.launchSpec(path.join(root, previous.version));
         await startDeployment(project, spec);
-      } catch {
+        if (runtime.phase === 'running') log('이전 버전 ' + previous.tag + '을 다시 실행했습니다.');
+      } catch (rollbackError) {
         runtime.phase = 'failed';
+        log('이전 버전 ' + previous.tag + ' 실행 실패 · ' + displayError(rollbackError));
       }
     }
-    throw error;
+    const result = previous && runtime.phase === 'running'
+      ? ' 이전 버전 ' + previous.tag + '이 실행 중입니다.' : '';
+    throw new Error(message + result, { cause: error });
   }
   if (previous) await fs.rm(path.join(root, previous.version), { force: true, recursive: true }).catch(() => {});
 }

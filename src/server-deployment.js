@@ -154,7 +154,7 @@ async function startProcess({ cwd, command, args }, dataDirectory, runtime, onEx
   const child = spawn(command, args, { cwd, env: { ...env, ...parseEnv(config), SONAC_DATA_DIR: dataDirectory },
     detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   runtime.child = child;
-  const append = text => { runtime.log = (runtime.log + stripVTControlCharacters(text)).slice(-96000); };
+  const append = text => appendLog(runtime, text);
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding('utf8');
     stream.on('data', append);
@@ -179,6 +179,10 @@ async function startProcess({ cwd, command, args }, dataDirectory, runtime, onEx
   });
 }
 
+function appendLog(runtime, text) {
+  runtime.log = (runtime.log + stripVTControlCharacters(text)).slice(-96000);
+}
+
 async function stopProcess(runtime) {
   const child = runtime.child;
   if (!child?.pid) return;
@@ -200,4 +204,4 @@ async function stopProcess(runtime) {
   if (runtime.child === child) throw new Error('서버 프로세스 종료를 확인할 수 없습니다.');
 }
 
-module.exports = { releaseAssets, downloadAsset, extractZip, deploymentFolder, launchSpec, startProcess, stopProcess };
+module.exports = { releaseAssets, downloadAsset, extractZip, deploymentFolder, launchSpec, startProcess, stopProcess, appendLog };

@@ -21,7 +21,10 @@ test('a tagged GitHub ZIP can be downloaded, extracted, launched with local conf
   });
   await fs.mkdir(data);
   await fs.writeFile(path.join(data, '.env'), 'PORT=9876\n');
-  const archive = zipSync({ 'app/server.cjs': strToU8("console.log('PORT=' + process.env.PORT); console.error('stderr'); setInterval(() => {}, 1000);") });
+  const archive = zipSync({
+    'app/server.cjs': strToU8("require('./firebase-token.cjs'); console.log('PORT=' + process.env.PORT); console.error('stderr'); setInterval(() => {}, 1000);"),
+    'app/firebase-token.cjs': strToU8('module.exports = {};')
+  });
   const digest = 'sha256:' + createHash('sha256').update(archive).digest('hex');
   const token = 'example-private-release-token';
   t.mock.method(undici, 'fetch', async (url, { headers, redirect }) => {
@@ -48,6 +51,7 @@ test('a tagged GitHub ZIP can be downloaded, extracted, launched with local conf
   await assert.rejects(downloadAsset({ ...assets[0], digest: 'sha256:bad' }, signal, token), /검증/u);
   const bytes = await downloadAsset(assets[0], signal, token);
   await extractZip(bytes, stage, signal);
+  assert.equal(await fs.readFile(path.join(stage, 'app', 'firebase-token.cjs'), 'utf8'), 'module.exports = {};');
   const spec = await launchSpec(stage);
   assert.equal(spec.cwd, path.join(stage, 'app'));
   await startProcess(spec, data, runtime, () => {});
@@ -55,6 +59,26 @@ test('a tagged GitHub ZIP can be downloaded, extracted, launched with local conf
   assert.match(runtime.log, /stderr/u);
   await stopProcess(runtime);
   assert.equal(runtime.child, null);
+});
+
+test('a release list includes newer prerelease ZIPs and a latest URL retains the stable lookup', async t => {
+  const published = (tag, day, assetId) => ({
+    tag_name: tag, published_at: day, assets: [{ id: assetId, state: 'uploaded', name: 'relay.zip' }]
+  });
+  const stable = published('a1.1.0', '2026-11-15', 1);
+  const preview = { ...published('a1.2.0', '2026-11-16', 2), prerelease: true };
+  const draft = { ...published('a1.3.0', '2026-11-17', 3), draft: true };
+  const requests = [];
+  t.mock.method(undici, 'fetch', async (url, options) => {
+    assert.equal(options.cache, 'no-store');
+    requests.push(url.pathname + url.search);
+    return Response.json(url.pathname.endsWith('/latest') ? stable : [stable, draft, preview]);
+  });
+  const source = 'https://github.com/demo/project/releases';
+  const signal = new AbortController().signal;
+  assert.deepEqual((await releaseAssets(source, signal, '')).map(asset => asset.tag), ['a1.2.0', 'a1.1.0']);
+  assert.deepEqual((await releaseAssets(source + '/latest', signal, '')).map(asset => asset.tag), ['a1.1.0']);
+  assert.deepEqual(requests, ['/repos/demo/project/releases?per_page=30', '/repos/demo/project/releases/latest']);
 });
 
 test('ZIP extraction rejects traversal and portable filename collisions before writing files', async t => {
@@ -66,4 +90,18 @@ test('ZIP extraction rejects traversal and portable filename collisions before w
   await assert.rejects(extractZip(zipSync({ 'Server.js': contents, 'server.js': contents }), root, signal), /중복/u);
   await assert.rejects(extractZip(zipSync({ 'nul.txt': contents }), root, signal), /파일 경로/u);
   assert.deepEqual(await fs.readdir(root), []);
+});
+
+test('redeploying extracts new bytes for same-named files in the new release directory', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sonac-redeploy-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const previous = path.join(root, 'previous');
+  const next = path.join(root, 'next');
+  const signal = new AbortController().signal;
+  await extractZip(zipSync({ 'server.cjs': strToU8('old'), 'obsolete.txt': strToU8('old only') }), previous, signal);
+  await extractZip(zipSync({ 'server.cjs': strToU8('new'), 'firebase-token.cjs': strToU8('new module') }), next, signal);
+  assert.equal(await fs.readFile(path.join(next, 'server.cjs'), 'utf8'), 'new');
+  assert.equal(await fs.readFile(path.join(next, 'firebase-token.cjs'), 'utf8'), 'new module');
+  assert.equal(await fs.readFile(path.join(previous, 'server.cjs'), 'utf8'), 'old');
+  await assert.rejects(fs.access(path.join(next, 'obsolete.txt')), { code: 'ENOENT' });
 });
