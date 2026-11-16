@@ -21,9 +21,11 @@ test('a tagged GitHub ZIP can be downloaded, extracted, launched with local conf
   });
   await fs.mkdir(data);
   await fs.writeFile(path.join(data, '.env'), 'PORT=9876\n');
+  await fs.writeFile(path.join(data, 'firebase-token.cjs'), 'module.exports = "local";');
   const archive = zipSync({
-    'app/server.cjs': strToU8("require('./firebase-token.cjs'); console.log('PORT=' + process.env.PORT); console.error('stderr'); setInterval(() => {}, 1000);"),
-    'app/firebase-token.cjs': strToU8('module.exports = {};')
+    'app/server.cjs': strToU8("console.log('bundled=' + require('./firebase-token.cjs')); console.log('PORT=' + process.env.PORT); console.error('stderr'); setInterval(() => {}, 1000);"),
+    'app/.env': strToU8('PORT=1234\n'),
+    'app/firebase-token.cjs': strToU8('module.exports = "bundled";')
   });
   const digest = 'sha256:' + createHash('sha256').update(archive).digest('hex');
   const token = 'example-private-release-token';
@@ -51,12 +53,16 @@ test('a tagged GitHub ZIP can be downloaded, extracted, launched with local conf
   await assert.rejects(downloadAsset({ ...assets[0], digest: 'sha256:bad' }, signal, token), /검증/u);
   const bytes = await downloadAsset(assets[0], signal, token);
   await extractZip(bytes, stage, signal);
-  assert.equal(await fs.readFile(path.join(stage, 'app', 'firebase-token.cjs'), 'utf8'), 'module.exports = {};');
+  assert.equal(await fs.readFile(path.join(stage, 'app', 'firebase-token.cjs'), 'utf8'), 'module.exports = "bundled";');
   const spec = await launchSpec(stage);
   assert.equal(spec.cwd, path.join(stage, 'app'));
   await startProcess(spec, data, runtime, () => {});
+  assert.match(runtime.log, /bundled=bundled/u);
   assert.match(runtime.log, /PORT=9876/u);
   assert.match(runtime.log, /stderr/u);
+  assert.equal(await fs.readFile(path.join(spec.cwd, '.env'), 'utf8'), 'PORT=1234\n');
+  assert.equal(await fs.readFile(path.join(data, '.env'), 'utf8'), 'PORT=9876\n');
+  assert.equal(await fs.readFile(path.join(data, 'firebase-token.cjs'), 'utf8'), 'module.exports = "local";');
   await stopProcess(runtime);
   assert.equal(runtime.child, null);
 });

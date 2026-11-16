@@ -1086,6 +1086,7 @@ async function deployRelease(project, assetId) {
   const previous = file.deployment;
   const version = randomUUID();
   const stage = path.join(root, version);
+  let extracted = false;
   let stoppedPrevious = false;
   let starting = false;
   let tag;
@@ -1103,6 +1104,7 @@ async function deployRelease(project, assetId) {
     await fs.mkdir(data, { recursive: true, mode: 0o700 });
     await fs.mkdir(stage, { mode: 0o700 });
     await deployment.extractZip(bytes, stage, signal);
+    extracted = true;
     log(tag + ' ZIP을 새 배포 폴더에 풀었습니다.');
     const spec = await deployment.launchSpec(stage);
     signal.throwIfAborted();
@@ -1122,7 +1124,20 @@ async function deployRelease(project, assetId) {
     log(message);
     file.deployment = previous;
     if (starting) await deployment.stopProcess(runtime).catch(() => {});
-    if (!runtime.child || !starting) await fs.rm(stage, { force: true, recursive: true }).catch(() => {});
+    let retained = false;
+    if (!previous && extracted && !signal.aborted) {
+      file.deployment = { version, tag };
+      try {
+        await persist();
+        retained = true;
+        log('받은 파일은 배포 폴더에서 확인할 수 있습니다.');
+      } catch {
+        file.deployment = previous;
+      }
+    }
+    if (!retained && (!runtime.child || !starting)) {
+      await fs.rm(stage, { force: true, recursive: true }).catch(() => {});
+    }
     runtime.phase = runtime.child && !starting ? 'running' : 'failed';
     if (stoppedPrevious && previous && !signal.aborted && !runtime.child) {
       try {

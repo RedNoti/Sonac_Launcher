@@ -1,11 +1,13 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { execFile } = require('node:child_process');
 const { generateKeyPairSync, sign } = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { promisify } = require('node:util');
 const { compareVersions, installerName, manifestBytes, parseTag, readManifest } = require('../src/update-manifest');
 
 test('updates accept only a signed record for the expected platform and bytes', () => {
@@ -133,15 +135,42 @@ test('Windows update results distinguish successful installs, reboot requirement
   await assert.rejects(fs.access(result), { code: 'ENOENT' });
 });
 
-test('update handoff requires a ready marker even after the helper process has started', async t => {
-  const { launch } = require('../src/updater');
+test('Windows PowerShell runs the update helper after the launcher exits', { skip: process.platform !== 'win32' }, async t => {
+  const { launchWindowsHelper } = require('../src/updater');
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'sonac-update-handoff-'));
-  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  const script = path.join(cwd, 'install fixture.ps1');
   const marker = path.join(cwd, 'helper-ready');
-  await assert.rejects(launch(process.execPath, ['-e', 'process.exit(1)'], { cwd }, marker, 1500), /helper\.log/u);
-  await assert.rejects(launch(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'], { cwd }, marker, 250), /helper\.log/u);
-  await launch(process.execPath, ['-e',
-    'require("node:fs").writeFileSync("helper-ready", "ready"); setTimeout(() => {}, 600);'
-  ], { cwd }, marker, 1500);
-  assert.equal(await fs.readFile(marker, 'utf8'), 'ready');
+  await fs.writeFile(script, 'exit 0');
+  await assert.rejects(launchWindowsHelper(script, [], cwd, marker), /helper\.log/u);
+  await fs.writeFile(script, [
+    'param([int]$ParentPid)',
+    '$ErrorActionPreference = "Stop"',
+    '$parent = Get-Process -Id $ParentPid',
+    '$null = $parent.Handle',
+    'Set-Content -LiteralPath helper-ready -Value ready',
+    'if (!$parent.WaitForExit(5000)) { throw "Launcher did not exit." }',
+    'Set-Content -LiteralPath helper-finished -Value finished -Encoding Ascii'
+  ].join('\r\n'));
+  const launcher = [
+    'const { launchWindowsHelper } = require(process.argv[1]);',
+    'const [script, marker] = process.argv.slice(2);',
+    'launchWindowsHelper(script, [String(process.pid)], process.cwd(), marker).catch(error => {',
+    '  console.error(error); process.exitCode = 1;',
+    '});'
+  ].join('\n');
+  await promisify(execFile)(process.execPath,
+    ['-e', launcher, require.resolve('../src/updater'), script, marker],
+    { cwd, windowsHide: true, timeout: 20000 });
+  const deadline = Date.now() + 5000;
+  const result = path.join(cwd, 'helper-finished');
+  for (;;) {
+    const content = await fs.readFile(result, 'utf8').catch(error => {
+      if (error.code !== 'ENOENT') throw error;
+      return '';
+    });
+    if (content.trim() === 'finished') break;
+    assert.ok(Date.now() < deadline, 'PowerShell did not continue after the launcher exited');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
 });

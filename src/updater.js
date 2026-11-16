@@ -10,7 +10,6 @@ const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const path = require('node:path');
 const os = require('node:os');
-const { setTimeout: delay } = require('node:timers/promises');
 const { compareVersions, installerName, readManifest, sha256, parseTag, releaseChannels } = require('./update-manifest');
 
 const period = 60 * 60 * 1000;
@@ -78,12 +77,12 @@ const windowsInstaller = [
   '    $actual = if (Test-Path -LiteralPath $marker -PathType Leaf) { (Get-Content -LiteralPath $marker -Raw).Trim() }',
   '    if (!(Test-Path -LiteralPath $installed -PathType Leaf) -or $actual -cne $Expected) {',
   '      $status = "version"',
-  '      [Console]::Error.WriteLine("Expected release: $Expected. Installed release: $actual")',
+  '      [Console]::WriteLine("Expected release: $Expected. Installed release: $actual")',
   '    }',
   '  }',
   '} catch {',
   '  $status = "helper"',
-  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  [Console]::WriteLine($_.Exception.Message)',
   '} finally {',
   '  if (Test-Path -LiteralPath $ready) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }',
   '}',
@@ -92,7 +91,7 @@ const windowsInstaller = [
   'if ($status -eq "0" -and $Restart -eq 1) {',
   '  try { Start-Process -FilePath $installed -WorkingDirectory (Split-Path -Parent $installed) } catch {',
   '    $status = "relaunch"',
-  '    [Console]::Error.WriteLine($_.Exception.Message)',
+  '    [Console]::WriteLine($_.Exception.Message)',
   '    Set-Content -LiteralPath $result -Value $status -Encoding Ascii',
   '  }',
   '}',
@@ -101,7 +100,7 @@ const windowsInstaller = [
   '    $message = "SONAC Launcher update result: $status. See the update logs in $Logs."',
   '    $popup = New-Object -ComObject WScript.Shell',
   '    [void]$popup.Popup($message, 20, "SONAC Launcher", 48)',
-  '  } catch { [Console]::Error.WriteLine($_.Exception.Message) }',
+  '  } catch { [Console]::WriteLine($_.Exception.Message) }',
   '}'
 ].join('\r\n');
 
@@ -234,33 +233,54 @@ async function download(repository, tag, record, directory, signal, progress) {
   return filename;
 }
 
-async function launch(command, args, options, readyMarker, startupTimeout = 10000) {
-  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true, ...options });
+async function launch(command, args) {
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
   await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('spawn', resolve);
   });
-  if (readyMarker) {
-    const deadline = Date.now() + startupTimeout;
-    try {
-      while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
-        if (await fs.stat(readyMarker).then(info => info.isFile(), error => {
-          if (error.code === 'ENOENT') return false;
-          throw error;
-        })) {
-          child.unref();
-          return;
-        }
-        await delay(100);
-      }
-      throw new Error('Windows 설치 도우미가 시작되지 않았습니다. ' + path.join(options.cwd, 'helper.log'));
-    } catch (error) {
-      child.kill();
-      await fs.rm(readyMarker, { force: true }).catch(() => {});
-      throw error;
-    }
-  }
   child.unref();
+}
+
+async function launchWindowsHelper(script, args, logs, readyMarker) {
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const flags = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
+  const quote = value => "'" + value.replaceAll("'", "''") + "'";
+  const argumentsLine = [...flags, '-File', ...[script, ...args].map(value => '"' + value + '"')].join(' ');
+  const log = path.join(logs, 'helper.log');
+  const errorLog = path.join(logs, 'helper-error.log');
+  const startupLog = path.join(logs, 'helper-startup.log');
+  // Start-Process lets the hidden helper outlive the Node process that starts it.
+  const bootstrap = [
+    '$ErrorActionPreference = "Stop"',
+    '$ProgressPreference = "SilentlyContinue"',
+    '$helper = Start-Process -FilePath ' + quote(powershell) + ' -ArgumentList ' + quote(argumentsLine) +
+      ' -WorkingDirectory ' + quote(logs) + ' -WindowStyle Hidden -PassThru' +
+      ' -RedirectStandardOutput ' + quote(log) + ' -RedirectStandardError ' + quote(errorLog),
+    '$deadline = [DateTime]::UtcNow.AddSeconds(10)',
+    'while ([DateTime]::UtcNow -lt $deadline) {',
+    '  if (Test-Path -LiteralPath ' + quote(readyMarker) + ' -PathType Leaf) { exit 0 }',
+    '  if ($helper.HasExited) { break }',
+    '  Start-Sleep -Milliseconds 100',
+    '}',
+    'if (!$helper.HasExited) { Stop-Process -InputObject $helper -ErrorAction SilentlyContinue }',
+    'exit 1'
+  ].join('\r\n');
+  const output = await fs.open(startupLog, 'w');
+  try {
+    const child = spawn(powershell, [...flags, '-EncodedCommand', Buffer.from(bootstrap, 'utf16le').toString('base64')],
+      { cwd: logs, windowsHide: true, timeout: 15000, stdio: ['ignore', output.fd, output.fd] });
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', resolve);
+    });
+    if (code !== 0) throw new Error('PowerShell startup exit code: ' + code);
+  } catch (error) {
+    await fs.rm(readyMarker, { force: true }).catch(() => {});
+    throw new Error('Windows 설치 도우미가 시작되지 않았습니다. ' + log + '\n' + errorLog + '\n' + startupLog, { cause: error });
+  } finally {
+    await output.close().catch(() => {});
+  }
 }
 
 async function discoverReleases(repository, signal, getToken) {
@@ -384,15 +404,8 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
         const logs = path.join(dataDirectory, 'update-logs');
         await fs.mkdir(logs, { recursive: true });
         await fs.rm(path.join(logs, 'msi.log'), { force: true });
-        const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-        const log = await fs.open(path.join(logs, 'helper.log'), 'w');
-        try {
-          await launch(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-            script, parent, filename, relaunch, directory, logs, (record.channel ?? 'a') + record.version],
-          { cwd: logs, stdio: ['ignore', log.fd, log.fd] }, path.join(directory, 'helper-ready'));
-        } finally {
-          await log.close().catch(() => {});
-        }
+        await launchWindowsHelper(script, [parent, filename, relaunch, directory, logs, (record.channel ?? 'a') + record.version],
+          logs, path.join(directory, 'helper-ready'));
       }
       ready = null;
     },
@@ -409,4 +422,4 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
   };
 }
 
-module.exports = { createUpdater, discoverReleases, launch, releaseAsset, selectRelease, windowsInstallNotice };
+module.exports = { createUpdater, discoverReleases, launchWindowsHelper, releaseAsset, selectRelease, windowsInstallNotice };
