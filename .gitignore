@@ -9,3 +9,6 @@ nas-signing.pem
 .tauri-preview-ui/
 tauri-preview/target/
 tauri-preview/gen/
+/server-auth.json
+/firebase-config.cjs
+/exaone-config.json

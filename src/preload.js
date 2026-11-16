@@ -2,11 +2,14 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-const methods = ['state', 'login', 'logout', 'switchNas', 'list', 'listLocal', 'chooseLocal', 'settings', 'sync',
+const methods = ['state', 'setUsageMode', 'setPreference', 'login', 'logout', 'switchNas', 'list', 'listLocal', 'chooseLocal', 'settings', 'sync', 'syncAll',
   'layout', 'upload', 'download', 'delete', 'mkdir', 'preview', 'closePreview', 'checkUpdate', 'installUpdate', 'openLink',
-  'terminal', 'remoteWrites',
+  'terminal', 'remoteWrites', 'serverUpdaterLogin', 'serverUpdaterLogout', 'serverUpdaterRestore',
+  'serverFileAdd', 'serverFileRemove', 'serverFileOpen', 'serverMonitorSettings', 'serverMonitorTarget', 'aiHistory', 'aiChat', 'aiTitle', 'aiCancel',
+  'serverAssets', 'serverDeploy', 'serverRun', 'serverStop', 'serverLogs', 'serverDeploymentFolder', 'serverDataFolder',
+  'serverGitHubConnect', 'serverGitHubDisconnect', 'serverGitHubRepos',
   'githubConnect', 'githubDisconnect', 'githubRepos', 'githubCommit', 'githubTrack',
-  'areaGroupSave', 'areaGroupRemove', 'areaFolder', 'areaSave', 'areaRemove', 'areaRun'];
+  'areaGroupSave', 'areaGroupRemove', 'areaGroupMove', 'folderFavorite', 'areaFolder', 'areaSave', 'areaRemove', 'areaRun'];
 const launcher = Object.fromEntries(methods.map(name => [name, async (...args) => {
   const response = await ipcRenderer.invoke('launcher:' + name, ...args);
   if (!response.ok) throw new Error(response.error);
@@ -19,6 +22,12 @@ launcher.onState = (callback) => {
 };
 launcher.onTransfer = callback => {
   ipcRenderer.on('launcher:transfer', (_event, value) => callback(value));
+};
+launcher.onAiText = callback => {
+  ipcRenderer.on('launcher:aiText', (_event, requestId, text) => callback(requestId, text));
+};
+launcher.onAiPhase = callback => {
+  ipcRenderer.on('launcher:aiPhase', (_event, requestId, phase) => callback(requestId, phase));
 };
 launcher.platform = process.platform;
 

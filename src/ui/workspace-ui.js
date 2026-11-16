@@ -13,7 +13,6 @@ let areaGroupId = null;
 let groupEditing = null;
 let groupRepository = '';
 let returnToAreaGroup = null;
-let areaFormRequest = 0;
 const areaSources = { nas: 'NAS / 저장소', github: 'GitHub' };
 
 function drawAreas() {
@@ -87,6 +86,8 @@ function drawGroupTile(group) {
   const { id, name, items } = group;
   const item = tile(name, 'sync-folder', () => openAreaGroup(id), 'files');
   item.dataset.areaId = id;
+  item.dataset.groupId = id;
+  item.setAttribute('aria-keyshortcuts', 'Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown');
   item.setAttribute('aria-haspopup', 'dialog');
   if (items.length > 1) {
     fillFolderPreview(item, items.slice(0, 4).map(area => areaFolderIcon(area.last?.files?.[0])), items.length);
@@ -94,6 +95,74 @@ function drawGroupTile(group) {
   const summary = items.some(area => area.running) ? '동기화 중…' : '항목 ' + items.length + '개';
   item.append(make('span', summary, 'tile-summary'));
   return item;
+}
+
+function enableAreaSorting() {
+  const list = $('area-list');
+  let gesture;
+  let suppressClick = false;
+  const move = (id, target) => void api.areaGroupMove(id, target).catch(error => toast(error.message));
+  const clear = () => {
+    if (!gesture) return;
+    clearTimeout(gesture.timer);
+    gesture.tile.classList.remove('group-dragging');
+    gesture.tile.style.removeProperty('transform');
+    gesture.target?.classList.remove('group-drop-target');
+    gesture = undefined;
+  };
+  list.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    clear();
+    suppressClick = false;
+    const tile = event.target.closest('[data-group-id]');
+    if (!tile || areaGroups.length < 2) return;
+    const { pointerId, clientX: x, clientY: y } = event;
+    gesture = { tile, pointerId, x, y, timer: setTimeout(() => {
+      if (!tile.isConnected) return clear();
+      gesture.dragging = true;
+      suppressClick = true;
+      tile.classList.add('group-dragging');
+      list.setPointerCapture(pointerId);
+    }, 300) };
+  });
+  window.addEventListener('pointermove', event => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const x = event.clientX - gesture.x;
+    const y = event.clientY - gesture.y;
+    if (!gesture.dragging) {
+      if (Math.hypot(x, y) > 8) clear();
+      return;
+    }
+    if (!gesture.tile.isConnected) return clear();
+    gesture.tile.style.transform = 'translate(' + x + 'px, ' + y + 'px)';
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('#area-list [data-group-id]');
+    if (gesture.target === target) return;
+    gesture.target?.classList.remove('group-drop-target');
+    target?.classList.add('group-drop-target');
+    gesture.target = target;
+  });
+  window.addEventListener('pointerup', event => {
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    const { tile, target, dragging } = gesture;
+    clear();
+    if (dragging && tile.isConnected && target?.isConnected && target !== tile) {
+      move(tile.dataset.groupId, target.dataset.groupId);
+    }
+  });
+  window.addEventListener('pointercancel', clear);
+  window.addEventListener('blur', clear);
+  list.addEventListener('click', event => {
+    if (suppressClick && event.detail > 0) event.stopImmediatePropagation();
+    suppressClick = false;
+  }, true);
+  list.addEventListener('keydown', event => {
+    const tile = event.target.closest('[data-group-id]');
+    if (!tile || !event.altKey || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const direction = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1;
+    const target = areaGroups[areaGroups.findIndex(group => group.id === tile.dataset.groupId) + direction];
+    if (target) move(tile.dataset.groupId, target.id);
+  });
 }
 
 function openAreaGroup(id) {
@@ -227,12 +296,14 @@ async function refreshGithub() {
 }
 
 function openGithub() {
-  githubOpen = true;
-  showPage();
-  drawGithub();
-  notice('github-status');
-  $('github-title').focus();
-  void refreshGithub();
+  navigate(() => {
+    githubOpen = true;
+    showPage();
+    drawGithub();
+    notice('github-status');
+    $('github-title').focus();
+    void refreshGithub();
+  });
 }
 
 function workspaceChanged(previous) {
@@ -263,6 +334,7 @@ function areaSourceChanged() {
   const githubSource = form.source.value === 'github';
   $('area-auto').hidden = githubSource;
   form.repository.required = githubSource;
+  $('area-github-empty').hidden = !state.github || form.repository.options.length > 1;
   if (githubSource && !state.github) notice('area-error', '먼저 GitHub 타일에서 계정을 연결하세요.', true);
   else notice('area-error');
 }
@@ -282,30 +354,23 @@ function openArea({ area = null, repository = '', groupId = area?.groupId } = {}
   form.source.value = area?.source || (repository ? 'github' : 'nas');
   for (const field of ['remote', 'local', 'branch']) form[field].value = area?.[field] || '';
   form.automatic.checked = !!area?.automatic;
-  repoOptions(form.repository, githubRepos, area?.repository || repository);
+  const tracked = state.github?.tracked || [];
+  const repositories = tracked.map(name => githubRepos.find(repo => repo.name === name) || { name });
+  repoOptions(form.repository, repositories, area?.repository || (tracked.includes(repository) ? repository : ''));
   areaSourceChanged();
   $('area-dialog').showModal();
-  const request = ++areaFormRequest;
-  if (!state.github) return;
-  const login = state.github.login;
-  void api.githubRepos().then(rows => {
-    if (!$('area-dialog').open || areaFormRequest !== request || state.github?.login !== login) return;
-    githubRepos = rows;
-    repoOptions(form.repository, rows, form.repository.value);
-  }).catch(error => {
-    if ($('area-dialog').open && areaFormRequest === request && form.source.value === 'github') notice('area-error', error.message, true);
-  });
 }
 
 function initWorkspace() {
+  enableAreaSorting();
   const reportGithub = error => notice('github-status', error.message, true);
   const reportArea = error => notice('area-error', error.message, true);
-  $('github-home').addEventListener('click', () => {
+  $('github-home').addEventListener('click', () => navigate(() => {
     githubOpen = false;
     githubRequest++;
     showPage();
     document.querySelector('.tile .github')?.parentElement.focus();
-  });
+  }));
   $('github-shortcut').addEventListener('click', () => void api.openLink('githubShortcut').catch(reportGithub));
   $('github-token-help').addEventListener('click', () => {
     void api.openLink('githubToken').catch(reportGithub);

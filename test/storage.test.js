@@ -9,6 +9,7 @@ test('DSM accepts a bare host or host and port and keeps HTTPS restrictions', ()
   assert.equal(endpoint('nas.example.test:5001', 'synology'), 'https://nas.example.test:5001');
   assert.equal(endpoint('[::1]:5001', 'synology'), 'https://[::1]:5001');
   assert.equal(endpoint('https://nas.example.test/', 'synology'), 'https://nas.example.test');
+  assert.equal(endpoint('https://quickconnect.to/MyNas', 'synology'), 'https://mynas.quickconnect.to');
   for (const invalid of ['http://nas.example.test', 'nas.example.test/webapi', 'https://user@nas.example.test',
     'https://nas.example.test/?query', 'nas.example.test#fragment']) {
     assert.throws(() => endpoint(invalid, 'synology'));
@@ -22,6 +23,39 @@ const methods = {
   'SYNO.FileStation.Download': { path: 'entry.cgi', minVersion: 2, maxVersion: 2 },
   'SYNO.FileStation.Upload': { path: 'entry.cgi', minVersion: 2, maxVersion: 3 }
 };
+
+test('QuickConnect discovers HTTPS relay before sending DSM credentials', async t => {
+  const relay = 'https://mynas.sg3.quickconnect.to';
+  const fetch = t.mock.method(require('undici'), 'fetch', async (url, options) => {
+    assert.equal(options.redirect, 'manual');
+    if (url.hostname === 'global.quickconnect.to') {
+      const [query] = JSON.parse(options.body);
+      assert.equal(query.serverID, 'mynas');
+      assert.equal(query.id, 'mainapp_https');
+      assert.equal(query.command, 'get_server_info');
+      assert.equal(Object.hasOwn(query, 'passwd'), false);
+      return Response.json([{ errno: 0, service: { relay_dn: 'relay' }, env: { relay_region: 'sg3' } }]);
+    }
+    assert.equal(url.origin, relay);
+    if (url.pathname === '/webapi/query.cgi') return Response.json({ success: true, data: methods });
+    if (options.body.get('method') === 'login') {
+      assert.equal(options.body.get('passwd'), 'fixture-password');
+      return Response.json({ success: true, data: { sid: 'fixture-sid' } });
+    }
+    return Response.json({ success: true, data: { shares: [] } });
+  });
+  const nas = storage({ ...profile, url: 'https://mynas.quickconnect.to' });
+  await nas.connect({ password: 'fixture-password' }, '', false);
+  assert.equal(fetch.mock.callCount(), 4);
+});
+
+test('QuickConnect rejects an unsafe discovery response before DSM login', async t => {
+  const fetch = t.mock.method(require('undici'), 'fetch', async () =>
+    Response.json([{ errno: 0, service: { relay_dn: 'relay' }, env: { relay_region: 'sg3.attacker.example' } }]));
+  const nas = storage({ ...profile, url: 'https://mynas.quickconnect.to' });
+  await assert.rejects(nas.connect({ password: 'fixture-password' }, '', false), /중계 주소/u);
+  assert.equal(fetch.mock.callCount(), 1);
+});
 
 test('DSM accepts a session ID starting like a number when carried in its id cookie', async t => {
   const sid = '6E5h-test-session';

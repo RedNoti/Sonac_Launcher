@@ -49,7 +49,7 @@ async function repositories(token, signal) {
   const all = [];
   for (let page = 1; ; page++) {
     const response = await checked(await request(
-      '/user/repos?affiliation=owner&sort=full_name&per_page=100&page=' + page, token, signal
+      '/user/repos?affiliation=owner,collaborator,organization_member&sort=full_name&per_page=100&page=' + page, token, signal
     ));
     const rows = await response.json();
     all.push(...rows.map(row => ({

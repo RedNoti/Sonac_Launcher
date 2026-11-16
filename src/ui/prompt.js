@@ -20,11 +20,6 @@ dialog.addEventListener('cancel', event => {
   event.preventDefault();
   dismiss();
 });
-dialog.addEventListener('click', event => {
-  if (!dialog.classList.contains('restart-prompt') || event.target !== dialog) return;
-  const { left, right, top, bottom } = dialog.getBoundingClientRect();
-  if (event.clientX < left || event.clientX > right || event.clientY < top || event.clientY > bottom) dismiss();
-});
 
 void api.details().then(value => {
   document.getElementById('prompt-title').textContent = value.title;
@@ -35,13 +30,5 @@ void api.details().then(value => {
   cancel.hidden = !value.confirm;
   accept.textContent = value.action;
   if (value.danger) accept.className = 'danger';
-  if (value.restart) {
-    dialog.classList.add('restart-prompt');
-    const mark = document.createElement('span');
-    mark.className = 'update-mark';
-    mark.append(icon('check'));
-    dialog.prepend(mark);
-    accept.prepend(icon('sync'));
-  }
   dialog.showModal();
 }).catch(dismiss);

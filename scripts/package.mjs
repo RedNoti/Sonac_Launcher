@@ -89,15 +89,38 @@ async function releaseKey() {
   }
 }
 
+async function publicFirebaseConfig() {
+  const filename = path.join(root, 'firebase-config.cjs');
+  try {
+    await fs.access(filename);
+  } catch (error) {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const config = require(filename).firebaseConfig;
+  if (!config?.apiKey) return undefined;
+  return {
+    apiKey: config.apiKey,
+    authDomain: config.authDomain,
+    projectId: config.projectId,
+    appId: config.appId
+  };
+}
+
 async function applicationArchive(key, updateRepository) {
   const source = path.join(work, 'source');
   await fs.mkdir(path.join(source, 'node_modules'), { recursive: true });
   await fs.cp(path.join(root, 'src'), path.join(source, 'src'), { recursive: true });
   await fs.rm(path.join(source, 'src', 'ui', 'app.ico'));
-  for (const name of ['saxes', 'xmlchars', 'undici']) {
+  for (const name of ['saxes', 'xmlchars', 'undici', '@firebase/app', '@firebase/auth',
+    '@firebase/component', '@firebase/logger', '@firebase/util', 'idb', 'tslib']) {
     await fs.cp(path.join(root, 'node_modules', name), path.join(source, 'node_modules', name), { recursive: true });
   }
   const vendor = path.join(source, 'node_modules');
+  await fs.mkdir(path.join(vendor, 'firebase'), { recursive: true });
+  for (const name of ['package.json', 'app', 'auth']) {
+    await fs.cp(path.join(root, 'node_modules', 'firebase', name), path.join(vendor, 'firebase', name), { recursive: true });
+  }
   const pdfTarget = path.join(vendor, 'pdfjs-dist');
   await fs.mkdir(path.join(pdfTarget, 'build'), { recursive: true });
   for (const filename of ['LICENSE', 'build/pdf.min.mjs', 'build/pdf.worker.min.mjs']) {
@@ -107,7 +130,7 @@ async function applicationArchive(key, updateRepository) {
     await fs.cp(path.join(root, 'node_modules', 'pdfjs-dist', directory), path.join(pdfTarget, directory), { recursive: true });
   }
   for (const [name, files] of [
-    ['fflate', ['LICENSE', 'package.json', 'lib/browser.cjs', 'esm/browser.js']],
+    ['fflate', ['LICENSE', 'package.json', 'lib/browser.cjs', 'lib/node.cjs', 'esm/browser.js']],
     ['@xterm/xterm', ['LICENSE', 'lib/xterm.mjs', 'css/xterm.css']],
     ['@xterm/addon-fit', ['LICENSE', 'lib/addon-fit.mjs']]
   ]) {
@@ -120,6 +143,7 @@ async function applicationArchive(key, updateRepository) {
   await fs.writeFile(path.join(source, 'package.json'), JSON.stringify({
     name: manifest.name, productName: appName, version: manifest.version, releaseVersion: version,
     main: manifest.main, updateRepository, updateChannel,
+    firebaseConfig: await publicFirebaseConfig(),
     updatePublicKey: key ? createPublicKey(key).export({ type: 'spki', format: 'der' }).toString('base64') : undefined
   }));
   const filename = path.join(work, 'app.asar');
@@ -202,6 +226,7 @@ async function packageMac(extracted, archive, output) {
 async function packageWindows(extracted, archive, output) {
   const resources = path.join(extracted, 'resources');
   await fs.copyFile(archive, path.join(resources, 'app.asar'));
+  await fs.writeFile(path.join(resources, 'sonac-release.txt'), updateChannel + version + '\n');
   await stageTerminal(resources);
   await fs.rm(path.join(resources, 'default_app.asar'), { force: true });
   const executable = path.join(extracted, appName + '.exe');

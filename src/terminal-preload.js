@@ -8,9 +8,10 @@ const call = async (name, ...args) => {
 };
 contextBridge.exposeInMainWorld('terminal', {
   home: () => call('terminalHome'),
-  start: (cols, rows) => call('terminalStart', cols, rows),
-  write: data => call('terminalWrite', data),
-  resize: (cols, rows) => call('terminalResize', cols, rows),
+  start: (id, cols, rows) => call('terminalStart', id, cols, rows),
+  closeTab: id => call('terminalCloseTab', id),
+  write: (id, data) => call('terminalWrite', id, data),
+  resize: (id, cols, rows) => call('terminalResize', id, cols, rows),
   commands: () => call('terminalCommands'),
   saveCommand: value => call('terminalCommandSave', value),
   removeCommand: id => call('terminalCommandRemove', id),

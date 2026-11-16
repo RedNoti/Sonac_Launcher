@@ -6,13 +6,16 @@ use serde_json::{json, Value};
 fn preview_state() -> Value {
     json!({
         "connected": true,
+        "usageMode": "both",
         "device": "Tauri 미리보기",
         "profile": {"provider": "synology", "url": "https://nas.example.test", "user": "demo"},
         "settings": {
             "remote": "", "local": "", "interval": 5, "automatic": false,
             "layout": {"version": 1, "links": {}, "shortcuts": []},
+            "syncGroups": [{"id": "preview-group", "name": "샘플 동기화 영역"}],
             "areas": [{
                 "id": "preview", "name": "샘플 동기화 영역", "source": "nas",
+                "groupId": "preview-group",
                 "remote": "/Shared", "automatic": false,
                 "last": {"fileCount": 2, "files": ["README.txt", "media/demo.txt"]}
             }]

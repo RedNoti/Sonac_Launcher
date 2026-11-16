@@ -73,6 +73,10 @@ function endpoint(value, provider) {
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     throw new Error('계정 정보, 쿼리, 해시를 제외한 HTTPS 주소를 입력하세요.');
   }
+  if (provider === 'synology' && url.hostname === 'quickconnect.to' && !url.port) {
+    const alias = /^\/([a-z][a-z0-9-]{0,62})\/?$/iu.exec(url.pathname)?.[1];
+    if (alias) return 'https://' + alias.toLowerCase() + '.quickconnect.to';
+  }
   if (provider === 'synology' && url.pathname !== '/') {
     throw new Error('DSM 주소에서 경로를 빼고 호스트와 포트만 입력하세요.');
   }
@@ -154,6 +158,42 @@ async function dsmJSON(response, phase = '') {
   throw error;
 }
 
+async function quickConnectOrigin(origin, signal) {
+  const { hostname, port } = new URL(origin);
+  const alias = !port && /^([a-z][a-z0-9-]{0,62})\.quickconnect\.to$/u.exec(hostname)?.[1];
+  if (!alias) return origin;
+  const discover = async (host, command) => {
+    const response = await request('https://' + host + '/Serv.php', {
+      method: 'POST',
+      body: JSON.stringify([{ version: 1, command, id: 'mainapp_https', serverID: alias,
+        stop_when_error: false, stop_when_success: command === 'request_tunnel', is_gofile: false, path: '' }])
+    }, signal, command === 'request_tunnel' ? 30000 : 10000);
+    await checked(response);
+    try {
+      return JSON.parse(await responseText(response, 65536))?.[0];
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      throw new Error('Synology QuickConnect 연결 정보를 읽을 수 없습니다.', { cause: error });
+    }
+  };
+  const info = await discover('global.quickconnect.to', 'get_server_info');
+  if (info?.errno !== 0) throw new Error('QuickConnect ID와 NAS의 QuickConnect 설정을 확인하세요.');
+  let region = info.env?.relay_region;
+  if (!info.service?.relay_dn) {
+    const control = info.env?.control_host;
+    if (!/^[a-z0-9-]+\.quickconnect\.to$/u.test(control || '')) {
+      throw new Error('Synology QuickConnect 중계 서버 주소를 확인할 수 없습니다.');
+    }
+    const tunnel = await discover(control, 'request_tunnel');
+    if (tunnel?.errno !== 0) throw new Error('NAS의 QuickConnect 중계 서비스를 확인하세요.');
+    region = tunnel.env?.relay_region;
+  }
+  if (!/^[a-z]{2}\d{1,3}$/u.test(region || '')) {
+    throw new Error('QuickConnect HTTPS 중계 주소를 확인할 수 없습니다.');
+  }
+  return 'https://' + alias + '.' + region + '.quickconnect.to';
+}
+
 function dsmSession(response, data) {
   const validId = value => typeof value === 'string' && /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,1024}$/u.test(value);
   const cookieId = response.headers.getSetCookie()
@@ -182,7 +222,8 @@ class Synology {
   }
 
   async connect(secret, otp, remember, signal) {
-    const infoURL = new URL('/webapi/query.cgi', this.profile.url);
+    const origin = await quickConnectOrigin(this.profile.url, signal);
+    const infoURL = new URL('/webapi/query.cgi', origin);
     infoURL.search = new URLSearchParams({
       api: 'SYNO.API.Info', version: '1', method: 'query', query: Object.values(APIS).join(',')
     });
@@ -198,7 +239,7 @@ class Synology {
         if (type === 'delete' || type === 'mkdir') continue;
         throw new Error('DSM File Station API를 찾을 수 없습니다. NAS에서 File Station 패키지 상태를 확인하세요.');
       }
-      this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, this.profile.url) };
+      this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, origin) };
     }
     const auth = {
       account: this.profile.user, passwd: secret.password, session: 'FileStation',

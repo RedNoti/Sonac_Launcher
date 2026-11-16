@@ -10,6 +10,7 @@ const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const path = require('node:path');
 const os = require('node:os');
+const { setTimeout: delay } = require('node:timers/promises');
 const { compareVersions, installerName, readManifest, sha256, parseTag, releaseChannels } = require('./update-manifest');
 
 const period = 60 * 60 * 1000;
@@ -48,19 +49,79 @@ const macInstaller = [
 ].join('\n');
 
 const windowsInstaller = [
-  'param([int]$ParentPid, [string]$Installer, [string]$Application, [int]$Restart, [string]$Work)',
+  'param([int]$ParentPid, [string]$Installer, [int]$Restart, [string]$Work, [string]$Logs, [string]$Expected)',
   '$ErrorActionPreference = "Stop"',
+  '$result = Join-Path $Logs "install-result.txt"',
+  '$msiLog = Join-Path $Logs "msi.log"',
+  '$status = "helper"',
+  '$installed = Join-Path $env:LOCALAPPDATA "Programs\\SonacLauncher\\sonac launcher.exe"',
+  '$ready = Join-Path $Work "helper-ready"',
   'try {',
-  '  $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
-  '  if ($parent) { $parent | Wait-Process -Timeout 120 }',
-  "  $arguments = '/i \"{0}\" /quiet /norestart' -f $Installer",
-  '  $setup = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\\msiexec.exe") -ArgumentList $arguments -Wait -PassThru',
-  '  if ($setup.ExitCode -ne 0) { throw "Installer failed" }',
-  '  if ($Restart -eq 1) { Start-Process -FilePath $Application }',
+  '  $parent = Get-Process -Id $ParentPid',
+  '  $null = $parent.Handle',
+  '  if (!(Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "Downloaded MSI is missing." }',
+  '  [Console]::WriteLine("Waiting for SONAC Launcher to exit (PID $ParentPid).")',
+  '  Set-Content -LiteralPath $ready -Value "ready" -Encoding Ascii',
+  '  if (!$parent.WaitForExit(120000)) { throw "SONAC Launcher did not exit within 120 seconds." }',
+  '  [Console]::WriteLine("Starting Windows Installer for $Expected.")',
+  "  $arguments = '/i \"{0}\" /passive /norestart /L*v \"{1}\"' -f $Installer, $msiLog",
+  '  for ($attempt = 0; $attempt -lt 4; $attempt++) {',
+  '    if ($attempt -gt 0) { Start-Sleep -Seconds 5 }',
+  '    $setup = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\\msiexec.exe") -WorkingDirectory $Logs -ArgumentList $arguments -PassThru',
+  '    $setup.WaitForExit()',
+  '    $status = [string]$setup.ExitCode',
+  '    [Console]::WriteLine("Windows Installer exit code: $status")',
+  '    if ($status -ne "1618") { break }',
+  '  }',
+  '  if ($status -eq "0") {',
+  '    $marker = Join-Path (Split-Path -Parent $installed) "resources\\sonac-release.txt"',
+  '    $actual = if (Test-Path -LiteralPath $marker -PathType Leaf) { (Get-Content -LiteralPath $marker -Raw).Trim() }',
+  '    if (!(Test-Path -LiteralPath $installed -PathType Leaf) -or $actual -cne $Expected) {',
+  '      $status = "version"',
+  '      [Console]::Error.WriteLine("Expected release: $Expected. Installed release: $actual")',
+  '    }',
+  '  }',
+  '} catch {',
+  '  $status = "helper"',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
   '} finally {',
-  '  Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue',
+  '  if (Test-Path -LiteralPath $ready) { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }',
+  '}',
+  'Set-Content -LiteralPath "$result.tmp" -Value $status -Encoding Ascii',
+  'Move-Item -LiteralPath "$result.tmp" -Destination $result -Force',
+  'if ($status -eq "0" -and $Restart -eq 1) {',
+  '  try { Start-Process -FilePath $installed -WorkingDirectory (Split-Path -Parent $installed) } catch {',
+  '    $status = "relaunch"',
+  '    [Console]::Error.WriteLine($_.Exception.Message)',
+  '    Set-Content -LiteralPath $result -Value $status -Encoding Ascii',
+  '  }',
+  '}',
+  'if ($status -ne "0") {',
+  '  try {',
+  '    $message = "SONAC Launcher update result: $status. See the update logs in $Logs."',
+  '    $popup = New-Object -ComObject WScript.Shell',
+  '    [void]$popup.Popup($message, 20, "SONAC Launcher", 48)',
+  '  } catch { [Console]::Error.WriteLine($_.Exception.Message) }',
   '}'
 ].join('\r\n');
+
+async function windowsInstallNotice(dataDirectory) {
+  const logs = path.join(dataDirectory, 'update-logs');
+  const result = path.join(logs, 'install-result.txt');
+  const code = (await fs.readFile(result, 'utf8').catch(() => '')).trim();
+  if (!/^(?:helper|version|relaunch|\d{1,10})$/u.test(code)) return null;
+  await fs.rm(result, { force: true });
+  if (code === '0') return null;
+  if (code === '3010' || code === '1641') return { title: 'Windows를 다시 시작해 주세요',
+    message: 'Windows를 다시 시작하면 런처 업데이트 적용이 완료됩니다.' };
+  if (code === 'version') return { title: '설치된 버전을 확인할 수 없습니다',
+    message: 'GitHub 릴리스의 MSI를 내려받아 설치해 주세요.', detail: path.join(logs, 'helper.log') };
+  if (code === 'relaunch') return { title: '런처를 다시 열 수 없습니다',
+    message: '설치는 완료되었습니다. 시작 메뉴에서 런처를 열어 주세요.', detail: path.join(logs, 'helper.log') };
+  return { title: '런처 업데이트를 적용하지 못했습니다',
+    message: code === 'helper' ? 'Windows 설치 프로그램을 실행하지 못했습니다.' : 'Windows Installer 오류 코드 ' + code,
+    detail: path.join(logs, code === 'helper' ? 'helper.log' : 'msi.log') };
+}
 
 const manifestName = target => 'latest-' + target + '.json';
 
@@ -91,9 +152,14 @@ async function releaseJSON(response, limit) {
   if (!response.ok || !response.body) {
     await response.body?.cancel();
     if (response.status === 429 || response.status === 403 && response.headers.get('x-ratelimit-remaining') === '0') {
-      throw Object.assign(new Error('GitHub 호출 한도를 초과했습니다.'), { code: 'SONAC_GITHUB_RATE_LIMIT' });
+      const retryAfter = Number(response.headers.get('retry-after'));
+      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+      const retryAt = Math.max(retryAfter > 0 ? Date.now() + retryAfter * 1000 : 0,
+        response.headers.get('x-ratelimit-remaining') === '0' ? reset : 0);
+      throw Object.assign(new Error('GitHub 호출 한도를 초과했습니다.'), { code: 'SONAC_GITHUB_RATE_LIMIT', retryAt });
     }
-    throw new Error('GitHub 업데이트 목록을 확인할 수 없습니다. (HTTP ' + response.status + ')');
+    throw Object.assign(new Error('GitHub 업데이트 목록을 확인할 수 없습니다. (HTTP ' + response.status + ')'),
+      { status: response.status });
   }
   const chunks = [];
   let size = 0;
@@ -105,10 +171,11 @@ async function releaseJSON(response, limit) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-async function listReleases(repository, signal) {
+async function listReleases(repository, signal, token) {
   const releases = [];
   const options = { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
     redirect: 'error', cache: 'no-store', headers: { Accept: 'application/vnd.github+json' } };
+  if (token) options.headers.Authorization = 'Bearer ' + token;
   for (let page = 1; page <= 5; page++) {
     const url = 'https://api.github.com/repos/' + repository + '/releases?per_page=50&page=' + page;
     const response = await httpsFetch(url, options);
@@ -167,15 +234,47 @@ async function download(repository, tag, record, directory, signal, progress) {
   return filename;
 }
 
-function launch(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+async function launch(command, args, options, readyMarker, startupTimeout = 10000) {
+  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true, ...options });
+  await new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.once('spawn', () => { child.unref(); resolve(); });
+    child.once('spawn', resolve);
   });
+  if (readyMarker) {
+    const deadline = Date.now() + startupTimeout;
+    try {
+      while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
+        if (await fs.stat(readyMarker).then(info => info.isFile(), error => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        })) {
+          child.unref();
+          return;
+        }
+        await delay(100);
+      }
+      throw new Error('Windows 설치 도우미가 시작되지 않았습니다. ' + path.join(options.cwd, 'helper.log'));
+    } catch (error) {
+      child.kill();
+      await fs.rm(readyMarker, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+  child.unref();
 }
 
-function createUpdater({ version, channel = 'R', publicKey, repository, publish, executable = process.execPath }) {
+async function discoverReleases(repository, signal, getToken) {
+  const token = await getToken().catch(() => undefined);
+  try {
+    return await listReleases(repository, signal, token);
+  } catch (error) {
+    if (!token || ![401, 403, 404].includes(error.status)) throw error;
+    return listReleases(repository, signal);
+  }
+}
+
+function createUpdater({ version, channel = 'R', publicKey, repository, publish, getToken = async () => undefined,
+  executable = process.execPath, dataDirectory }) {
   const target = process.platform === 'darwin' && process.arch === 'arm64' ? 'mac-arm64' :
     process.platform === 'win32' && process.arch === 'x64' ? 'win-x64' : null;
   const key = publicKey && /^[\w.-]+\/[\w.-]+$/u.test(repository || '') && target ?
@@ -199,7 +298,8 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
     checking = (async () => {
       let issue = 'connection';
       try {
-        const { release, missingAssets } = selectRelease(await listReleases(repository, controller.signal), version, channel, target);
+        const releases = await discoverReleases(repository, controller.signal, getToken);
+        const { release, missingAssets } = selectRelease(releases, version, channel, target);
         if (!release) {
           available = null;
           if (!stopped) publish({ phase: missingAssets ? 'missing' : 'current' });
@@ -218,7 +318,8 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
         publish({ phase: 'available', version: record.version, tag: release.tag });
       } catch (error) {
         if (!stopped && !available) {
-          publish({ phase: 'error', issue: error.code === 'SONAC_GITHUB_RATE_LIMIT' ? 'rateLimit' : issue });
+          publish({ phase: 'error', issue: error.code === 'SONAC_GITHUB_RATE_LIMIT' ? 'rateLimit' : issue,
+            retryAt: error.retryAt });
         }
       } finally {
         checking = null;
@@ -280,8 +381,18 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
       } else {
         const script = path.join(directory, 'install.ps1');
         await fs.writeFile(script, windowsInstaller, { mode: 0o600 });
-        await launch('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-          script, parent, filename, executable, relaunch, directory]);
+        const logs = path.join(dataDirectory, 'update-logs');
+        await fs.mkdir(logs, { recursive: true });
+        await fs.rm(path.join(logs, 'msi.log'), { force: true });
+        const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        const log = await fs.open(path.join(logs, 'helper.log'), 'w');
+        try {
+          await launch(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+            script, parent, filename, relaunch, directory, logs, (record.channel ?? 'a') + record.version],
+          { cwd: logs, stdio: ['ignore', log.fd, log.fd] }, path.join(directory, 'helper-ready'));
+        } finally {
+          await log.close().catch(() => {});
+        }
       }
       ready = null;
     },
@@ -298,4 +409,4 @@ function createUpdater({ version, channel = 'R', publicKey, repository, publish,
   };
 }
 
-module.exports = { createUpdater, releaseAsset, selectRelease };
+module.exports = { createUpdater, discoverReleases, launch, releaseAsset, selectRelease, windowsInstallNotice };
