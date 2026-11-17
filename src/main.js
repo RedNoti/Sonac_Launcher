@@ -7,14 +7,17 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const tls = require('node:tls');
-const { storage, endpoint, remotePath, openAsBlob, networkFailure } = require('./storage');
+const { setTimeout: delay } = require('node:timers/promises');
+const { storage, endpoint, remotePath, childPath, openAsBlob, networkFailure } = require('./storage');
 const { certificatePin } = require('./transport');
 const { profileBinding, wrapped, seal, unseal } = require('./credentials');
 const { LAYOUT_FILE, cleanLayout, pullFiles, scanMissing, downloadFile, downloadSelection, guardedFolder } = require('./sync');
-const { origin, createPreview, clearPreview, serve } = require('./preview');
+const { origin, createPreview, clearPreview, compatibleVideo, serve } = require('./preview');
 const { createUpdater, windowsInstallNotice } = require('./updater');
 const { signInWithEmail, refreshLauncherSession } = require('./launcher-auth');
 const exaone = require('./exaone');
+const { extractAttachment, withAttachments, fileLimit, textLimit, attachmentLimit } = require('./ai-attachments');
+const { scanMediaFolders, musicTags, coverFile, readArtwork } = require('./music-library');
 const reports = require('./server-reports');
 const deployment = require('./server-deployment');
 const { manifestName } = require('./nas-integrity');
@@ -42,9 +45,9 @@ const usageModes = new Set(['nas', 'server', 'both']);
 const sessionErrors = new Set([106, 107, 119]);
 const updateBlockingHandlers = new Set(['login', 'logout', 'settings', 'upload', 'download', 'delete',
   'githubConnect', 'githubDisconnect', 'githubTrack', 'areaGroupSave', 'areaGroupRemove', 'areaGroupMove', 'folderFavorite',
-  'areaSave', 'areaRemove', 'areaRun', 'syncAll', 'remoteWrites', 'switchNas', 'mkdir',
+  'areaSave', 'areaRemove', 'areaRun', 'syncAll', 'remoteWrites', 'switchNas', 'mkdir', 'renameFile', 'extractArchive',
   'serverFileAdd', 'serverFileRemove', 'serverDeploy', 'serverRun', 'serverStop', 'serverGitHubConnect', 'serverGitHubDisconnect',
-  'serverMonitorSettings', 'serverMonitorTarget', 'setPreference',
+  'serverMonitorSettings', 'serverMonitorTarget', 'serverMonitorCheck', 'mediaFolder', 'setPreference',
   'terminalCommandSave', 'terminalCommandRemove']);
 const pendingOperations = new Set();
 const areaJobs = new Map();
@@ -213,7 +216,9 @@ function persist() {
 function status() {
   const { github: account, ...settings } = current ? workspace() : {};
   const session = serverSession;
+  const aiAccount = current || session;
   return {
+    packaged: app.isPackaged,
     versionLabel: (app.isPackaged ? updateChannel ?? 'R' : '') + releaseVersion,
     usageMode: usageModes.has(db?.usageMode) ? db.usageMode : null,
     profile: current?.profile || db?.profile,
@@ -225,17 +230,19 @@ function status() {
     applyingUpdate,
     restartingUpdate: restartForUpdate,
     terminalOpen: !!terminalView,
-    serverUpdaterAccount: session ? {
+    serverUpdaterAccount: session && serverModeEnabled() ? {
       email: session.email,
       githubLogin: serverGitHubAccount(session)?.login,
       files: (Object.hasOwn(db.serverFiles ?? {}, session.uid) ? db.serverFiles[session.uid] : []).map(file => ({
-        id: file.id, name: file.name, url: file.url, installed: file.deployment?.tag,
+        id: file.id, name: file.name, url: file.url, installed: file.deployment?.tag, updatedAt: file.deployment?.updatedAt,
+        updating: session.deployments.get(file.id)?.operation === 'downloading',
         phase: session.deployments.get(file.id)?.phase || (file.deployment ? 'stopped' : 'new')
       })),
       monitoring: serverMonitoringStatus(session)
     } : null,
     serverRemembered: wrapped(db?.launcherRemembered),
-    aiUsage: current ? { rateLimit: current.rateLimit, tokens: current.tokens } : null,
+    aiEmail: session?.email,
+    aiUsage: aiAccount ? { rateLimit: aiAccount.rateLimit, tokens: aiAccount.tokens } : null,
     nasProfiles: db?.connections.map(({ profile, remembered }) => ({
       ...profile, id: accountKey(profile), saved: wrapped(remembered)
     })) || [],
@@ -404,7 +411,7 @@ async function monitorNetwork() {
   const online = net.isOnline();
   if (online && networkOnline === false) retryNetworkSoon(0);
   networkOnline = online;
-  if (!online || recoveringNetwork || applyingUpdate || connecting || restoringLogin || serverSession || serverAuthAttempt || quitting ||
+  if (!online || recoveringNetwork || applyingUpdate || connecting || restoringLogin || (serverSession && serverModeEnabled() && !current) || serverAuthAttempt || quitting ||
       (!current && !restorePending) || Date.now() < networkRetryAt) return;
   networkRetryAt = Infinity;
   recoveringNetwork = true;
@@ -439,7 +446,7 @@ function scheduleSync(immediate = false) {
 async function connect(profile, secret, otp, remember, { restoring = false, edited } = {}) {
   const nas = db;
   if (applyingUpdate) throw new Error('업데이트가 끝난 뒤 로그인하세요.');
-  if (connecting || current || (serverSession && nas.usageMode !== 'both') || serverAuthAttempt || quitting) {
+  if (connecting || current || (serverSession && nas.usageMode === 'server') || serverAuthAttempt || quitting) {
     throw new Error('이미 로그인 중이거나 앱을 종료하는 중입니다.');
   }
   connecting = true;
@@ -525,13 +532,8 @@ async function aiConnection() {
   const directory = app.isPackaged ? app.getPath('userData') : app.getAppPath();
   const filename = process.env.SONAC_EXAONE_CONFIG || path.join(directory, 'exaone-config.json');
   const config = await fs.readFile(filename, 'utf8').then(JSON.parse).catch(() => null);
-  const relayUrl = process.env.SONAC_EXAONE_RELAY_URL || config?.relayUrl;
-  const key = typeof config?.apiKey === 'string' ? config.apiKey.trim() : '';
-  if (!relayUrl && key) {
-    if (!/^[!-~]{1,4096}$/u.test(key)) throw new Error('exaone-config.json의 EXAONE API 키를 확인하세요.');
-    return key;
-  }
-  return exaone.relayEndpoint(relayUrl || defaultExaoneRelay, needServerSession().idToken);
+  const relayUrl = process.env.SONAC_EXAONE_RELAY_URL || config?.relayUrl || defaultExaoneRelay;
+  return exaone.relayEndpoint(relayUrl, needAiSession().idToken);
 }
 
 async function saveAiHistory(history, chats) {
@@ -760,12 +762,7 @@ function syncInFolder(local, action) {
 function githubAccount(connection, repository) {
   const account = workspace(connection).github;
   if (!wrapped(account?.token)) throw new Error('GitHub 타일에서 계정을 연결하세요.');
-  if (repository) {
-    github.repositoryPath(repository);
-    if (repository.split('/')[0].toLowerCase() !== account.login.toLowerCase()) {
-      throw new Error('연결한 GitHub 계정의 저장소를 선택하세요.');
-    }
-  }
+  if (repository) github.repositoryPath(repository);
   return account;
 }
 
@@ -916,6 +913,77 @@ async function selectedEntries(connection, source, folder, paths) {
   return { ...result, entries };
 }
 
+function writableName(input) {
+  const name = fileName(typeof input === 'string' && input.length <= 255 ? input : '');
+  if ([LAYOUT_FILE, manifestName].includes(name.toLowerCase())) throw new Error('동기화 제어 파일 이름은 사용할 수 없습니다.');
+  return name;
+}
+
+async function requireUnusedName(store, folder, name, signal, originalPath) {
+  const key = name.normalize('NFC').toLowerCase();
+  if ((await store.list(folder, signal)).some(item => item.path !== originalPath &&
+      item.name.normalize('NFC').toLowerCase() === key)) {
+    throw new Error('같은 이름의 파일 또는 폴더가 이미 있습니다.');
+  }
+}
+
+async function uploadExtractedFiles(connection, directory, folder) {
+  for (const item of await fs.readdir(directory, { withFileTypes: true })) {
+    requireRemoteWrites(connection);
+    const local = path.join(directory, item.name);
+    if (item.isDirectory()) {
+      await operate(connection, (store, signal) => store.mkdir(folder, item.name, signal));
+      await uploadExtractedFiles(connection, local, childPath(folder, item.name));
+    } else {
+      const blob = await openAsBlob(local);
+      await operate(connection, (store, signal) => store.upload(folder, item.name, blob, { signal }));
+    }
+  }
+}
+
+async function extractOnSynology(connection, location, entry, name) {
+  const report = transferReporter(connection, 'extract');
+  let staging;
+  if (name) {
+    const stagingName = 'sonac-extract-' + randomUUID();
+    await operate(connection, (store, signal) => store.mkdir(location, stagingName, signal));
+    staging = { path: childPath(location, stagingName), directory: true };
+  }
+  let task;
+  try {
+    requireRemoteWrites(connection);
+    task = await operate(connection, (store, signal) => store.startExtract(entry.path, staging?.path ?? location, signal));
+    report(entry.name, 0, null);
+    while (true) {
+      const status = await operate(connection, (store, signal) => store.extractStatus(task, signal));
+      if (status.finished) {
+        task = undefined;
+        break;
+      }
+      const percent = Number.isFinite(status.progress) && status.progress >= 0
+        ? Math.round(status.progress * 100) : null;
+      report(entry.name, percent ?? 0, percent === null ? null : 100);
+      await delay(1000, undefined, { signal: connection.abort.signal });
+    }
+    if (staging) {
+      await operate(connection, async (store, signal) => {
+        await requireUnusedName(store, location, name, signal);
+        requireRemoteWrites(connection);
+        await store.rename(location, staging, name, signal);
+      });
+      staging = undefined;
+    }
+    return name;
+  } finally {
+    if ((task || staging) && !connection.abort.signal.aborted && connection.remoteWrites) {
+      await operate(connection, async (store, signal) => {
+        if (task) await store.stopExtract(task, signal);
+        if (staging) await store.delete(staging, signal);
+      }).catch(() => {});
+    }
+  }
+}
+
 function terminalSize(cols, rows) {
   if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1 || cols > 1000 || rows > 500) {
     throw new Error('터미널 창 크기를 확인하세요.');
@@ -1006,8 +1074,29 @@ function closeTerminalTab(id) {
   try { pty?.kill(); } catch { /* process already ended */ }
 }
 
-function needServerSession() {
+function serverModeEnabled() {
+  const mode = pendingUsageMode ?? db?.usageMode;
+  return mode === 'server' || mode === 'both';
+}
+
+function needAiSession() {
   if (!serverSession || serverSession.expiresAt <= Date.now()) {
+    throw new Error('AI 채팅에 다시 로그인하세요.');
+  }
+  return serverSession;
+}
+
+function needAiAccount() {
+  const session = needAiSession();
+  return current || session;
+}
+
+function needTerminalSession() {
+  if (!current) needServerSession();
+}
+
+function needServerSession() {
+  if (!serverModeEnabled() || !serverSession || serverSession.expiresAt <= Date.now()) {
     throw new Error('서버 업데이터에 다시 로그인하세요.');
   }
   return serverSession;
@@ -1051,8 +1140,10 @@ function serverProject(id) {
 function runServerOperation(runtime, phase, operation) {
   if (applyingUpdate || runtime.task) throw new Error('진행 중인 작업이 끝난 뒤 다시 시도하세요.');
   runtime.phase = phase;
+  runtime.operation = phase;
   runtime.task = Promise.resolve().then(operation).finally(() => {
     runtime.task = undefined;
+    runtime.operation = undefined;
     publish();
   });
   publish();
@@ -1116,7 +1207,7 @@ async function deployRelease(project, assetId) {
     starting = true;
     await startDeployment(project, spec);
     signal.throwIfAborted();
-    file.deployment = { version, tag: asset.tag };
+    file.deployment = { version, tag: asset.tag, updatedAt: Date.now() };
     await persist();
     log(tag + ' 배포 완료');
   } catch (error) {
@@ -1172,7 +1263,7 @@ function serverMonitoringStatus(session) {
     enabled: settings.enabled, time: settings.time, hasWebhook: wrapped(settings.webhook),
     targets: settings.targets.map(({ id, name, url, latest }) => ({ id, name, url,
       latest: latest && { status: latest.status, at: latest.at, latencyMs: latest.latencyMs, httpStatus: latest.httpStatus } })),
-    latestReport: settings.latestReport, error: session.monitor?.error || ''
+    checking: !!session.monitor?.poll, latestReport: settings.latestReport, error: session.monitor?.error || ''
   };
 }
 
@@ -1204,24 +1295,25 @@ async function persistMonitoringChange(session, rollback) {
   return status();
 }
 
-async function runServerMonitoring(session, runtime) {
+async function runServerMonitoring(session, runtime, targetId) {
   const { signal } = runtime;
   if (runtime.poll || signal.aborted || session.expiresAt <= Date.now() || !net.isOnline()) return;
   const settings = monitoringSettings(session);
-  if (!settings.targets.length) return;
+  const targets = targetId ? settings.targets.filter(target => target.id === targetId) : settings.targets;
+  if (!targets.length) return;
   runtime.poll = true;
+  publish();
   try {
-    const checks = await Promise.all(settings.targets.map(async target => [target, await reports.probeTarget(target, signal)]));
+    const checks = await Promise.all(targets.map(async target => [target, await reports.probeTarget(target, signal)]));
     signal.throwIfAborted();
     for (const [target, observation] of checks) {
       const incident = reports.recordObservation(target, observation);
-      if (incident) settings.pending.push(incident);
+      if (incident && settings.enabled) settings.pending.push(incident);
     }
     settings.pending = settings.pending.slice(-20);
     await persist();
     signal.throwIfAborted();
-    publish();
-    if (!runtime.report) void prepareServerMonitoringReport(session, runtime);
+    if (settings.enabled && !runtime.report) void prepareServerMonitoringReport(session, runtime);
   } catch {
     if (!signal.aborted) {
       runtime.error = '모니터링 결과를 저장할 수 없습니다.';
@@ -1229,6 +1321,7 @@ async function runServerMonitoring(session, runtime) {
     }
   } finally {
     runtime.poll = false;
+    if (!signal.aborted) publish();
   }
 }
 
@@ -1302,6 +1395,9 @@ async function serverUpdaterLogout({ forget = false } = {}) {
   const session = serverSession;
   if (!session) return serverEnding;
   serverSession = undefined;
+  aiChatJob?.abort();
+  aiTitleJob?.controller.abort();
+  if (!current) closeTerminal();
   stopServerMonitoring(session);
   session.abort.abort();
   clearTimeout(serverAuthTimer);
@@ -1392,13 +1488,13 @@ function activateServerSession(session, firebaseConfig, remember, signal) {
   session.remember = remember;
   serverSession = session;
   scheduleServerRefresh(session);
-  startServerMonitoring(session);
+  if (serverModeEnabled()) startServerMonitoring(session);
   publish();
 }
 
-async function restoreServerSession() {
-  if (db.usageMode !== 'server' && db.usageMode !== 'both') return;
-  if (!db.launcherRemembered || serverAuthAttempt || serverSession || current || connecting || restoringLogin || applyingUpdate) return;
+async function restoreServerSession(forAi = false) {
+  if (forAi ? !current && !serverModeEnabled() : !serverModeEnabled() || current) return;
+  if (!db.launcherRemembered || serverAuthAttempt || serverSession || serverEnding || connecting || restoringLogin || applyingUpdate) return;
   const controller = serverAuthAttempt = new AbortController();
   serverAuthError = '';
   serverRestoring = true;
@@ -1435,7 +1531,30 @@ function releaseFileUrl(input) {
   return url.href;
 }
 
+let trashDataOnQuit = false;
+
 function registerHandlers() {
+  bind('uninstallMac', async () => {
+    if (process.platform !== 'darwin' || !app.isPackaged || applyingUpdate || quitting) {
+      throw new Error('설치된 macOS 앱에서 삭제할 수 있습니다.');
+    }
+    const bundle = path.resolve(process.execPath, '../../..');
+    if (path.extname(bundle) !== '.app') throw new Error('앱의 설치 위치를 확인할 수 없습니다.');
+    const { response } = await dialog.showMessageBox(window, {
+      type: 'warning',
+      message: '소낙 런처를 휴지통으로 이동할까요?',
+      detail: '로컬 데이터에는 로그인, 설정, AI 대화와 서버 배포 데이터가 포함됩니다. 지정한 동기화·다운로드 폴더의 파일은 유지됩니다.',
+      buttons: ['취소', '앱만 삭제', '앱 및 로컬 데이터 삭제'],
+      defaultId: 0,
+      cancelId: 0
+    });
+    if (response === 0) return;
+    if (applyingUpdate || quitting) throw new Error('진행 중인 작업이 끝난 뒤 다시 시도하세요.');
+    await shell.trashItem(bundle);
+    app.setLoginItemSettings({ openAtLogin: false });
+    trashDataOnQuit = response === 2;
+    app.quit();
+  });
   bind('setUsageMode', async (mode, preparing = false) => {
     if (preparing === true && mode === null) {
       pendingUsageMode = undefined;
@@ -1462,15 +1581,15 @@ function registerHandlers() {
     publish();
     return status();
   });
-  bind('serverUpdaterRestore', async () => {
-    await restoreServerSession();
+  bind('serverUpdaterRestore', async forAi => {
+    await restoreServerSession(forAi === true);
     return status();
   });
   bind('serverUpdaterLogin', async credentials => {
-    const mode = pendingUsageMode ?? db.usageMode;
-    if (mode !== 'server' && mode !== 'both') throw new Error('사용 모드에서 서버 업데이터를 선택하세요.');
+    const forAi = credentials?.forAi === true;
+    if (!serverModeEnabled() && !(forAi && current)) throw new Error('먼저 NAS에 로그인하세요.');
     if (serverAuthAttempt || serverSession || serverEnding) throw new Error('이전 세션이 끝난 뒤 로그인하세요.');
-    if (current || connecting || restoringLogin || applyingUpdate) throw new Error('다른 연결이 끝난 뒤 로그인하세요.');
+    if ((!forAi && current) || connecting || restoringLogin || applyingUpdate) throw new Error('다른 연결이 끝난 뒤 로그인하세요.');
     const { email, password, remember } = credentials ?? {};
     if (typeof email !== 'string' || !email.trim() || email.length > 254 ||
         typeof password !== 'string' || !password || password.length > 4096) {
@@ -1500,16 +1619,16 @@ function registerHandlers() {
     return status();
   });
   bind('aiHistory', async () => {
-    const connection = needConnection();
+    const connection = needAiAccount();
     await aiHistoryWrite?.catch(() => {});
-    if (current !== connection) throw new Error('저장소에 다시 로그인하세요.');
-    const id = accountKey(connection.profile);
+    if ((current || serverSession) !== connection || !serverSession) throw new Error('AI 채팅에 다시 로그인하세요.');
+    const id = connection.profile ? accountKey(connection.profile) : createHash('sha256').update(connection.uid).digest('hex');
     const directory = app.getPath('userData');
-    const history = connection.chatHistory ??= { filename: path.join(directory, 'nas-ai-history', id + '.json') };
+    const history = connection.chatHistory ??= { filename: path.join(directory, connection.profile ? 'nas-ai-history' : 'launcher-ai-history', id + '.json') };
     if (history.chats) return history.chats;
     const chats = await fs.readFile(history.filename, 'utf8').catch(async error => {
       if (error.code !== 'ENOENT') throw error;
-      const legacy = db.nasAiLegacy?.[id];
+      const legacy = connection.profile && db.nasAiLegacy?.[id];
       if (!legacy) return '[]';
       return fs.readFile(path.join(directory, 'ai-history', legacy + '.json'), 'utf8').catch(error => {
         if (error.code === 'ENOENT') return '[]';
@@ -1518,22 +1637,66 @@ function registerHandlers() {
     }).then(JSON.parse).catch(() => {
       throw new Error('이 PC에 저장된 AI 대화를 읽을 수 없습니다.');
     });
-    if (current !== connection) throw new Error('저장소에 다시 로그인하세요.');
+    if ((current || serverSession) !== connection || !serverSession) throw new Error('AI 채팅에 다시 로그인하세요.');
     if (!Array.isArray(chats)) throw new Error('이 PC에 저장된 AI 대화 형식을 확인하세요.');
     return history.chats ??= chats;
   });
-  bind('aiChat', async (requestId, chatId, content, effort) => {
-    const account = needConnection();
+  let choosingAiFiles = false;
+  bind('aiPickFiles', async () => {
+    const account = needAiAccount();
+    if (choosingAiFiles) return { files: [], errors: [] };
+    choosingAiFiles = true;
+    try {
+      const result = await dialog.showOpenDialog(window, {
+        title: 'AI 채팅에 문서 또는 코드 첨부',
+        properties: ['openFile', 'multiSelections']
+      });
+      if (result.canceled) return { files: [], errors: [] };
+      if (result.filePaths.length > attachmentLimit) throw new Error('파일은 한 번에 3개까지 첨부할 수 있습니다.');
+      const files = [];
+      const errors = [];
+      for (const filename of result.filePaths) {
+        const name = path.basename(filename).slice(0, 255);
+        try {
+          const handle = await fs.open(filename, 'r');
+          try {
+            const info = await handle.stat();
+            if (!info.isFile() || info.size > fileLimit) throw new Error('8 MiB 이하의 파일을 선택하세요.');
+            const buffer = Buffer.alloc(info.size);
+            let offset = 0;
+            while (offset < buffer.length) {
+              const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+              if (!bytesRead) break;
+              offset += bytesRead;
+            }
+            files.push(extractAttachment(name, buffer.subarray(0, offset)));
+          } finally {
+            await handle.close();
+          }
+        } catch (error) {
+          errors.push(name + ' · ' + (error.code ? '파일을 읽을 수 없습니다.' : error.message));
+        }
+      }
+      if (needAiAccount() !== account) throw new Error('AI 채팅에 다시 로그인하세요.');
+      return { files, errors };
+    } finally {
+      choosingAiFiles = false;
+    }
+  });
+  bind('aiChat', async (requestId, chatId, content, effort, attachments = []) => {
+    const account = needAiAccount();
     if (aiChatJob) throw new Error('현재 답변이 끝난 뒤 다시 보내세요.');
-    if (account.rateLimit?.retryAt > Date.now()) throw new Error('EXAONE 요청 한도 대기 중입니다.');
     if (!exaone.reasoningEfforts.includes(effort)) throw new Error('추론 강도를 확인하세요.');
     if (![requestId, chatId].every(id => typeof id === 'string' && /^[a-f0-9-]{36}$/u.test(id)) ||
-        typeof content !== 'string' || !content.trim() || content.length > 12000) {
+        typeof content !== 'string' || content.length > 12000 || !Array.isArray(attachments) ||
+        (!content.trim() && !attachments.length) || attachments.length > attachmentLimit ||
+        attachments.some(file => typeof file?.name !== 'string' || !file.name.trim() || file.name.length > 255 ||
+          typeof file.text !== 'string' || !file.text.trim() || file.text.length > textLimit)) {
       throw new Error('보낼 메시지를 확인하세요.');
     }
     const controller = aiChatJob = new AbortController();
     const sendPhase = phase => {
-      if (!controller.signal.aborted && current === account && window && !window.isDestroyed()) {
+      if (!controller.signal.aborted && (current || serverSession) === account && !!serverSession && window && !window.isDestroyed()) {
         window.webContents.send('launcher:aiPhase', requestId, phase);
       }
     };
@@ -1541,38 +1704,38 @@ function registerHandlers() {
       const titleJob = aiTitleJob;
       titleJob?.controller.abort();
       await titleJob?.task.catch(() => {});
-      if (controller.signal.aborted || current !== account) return null;
+      if (controller.signal.aborted || (current || serverSession) !== account || !serverSession) return null;
       const history = account.chatHistory;
       const chats = history?.chats;
       if (!chats) throw new Error('저장된 대화를 먼저 불러오세요.');
       const index = chats.findIndex(chat => chat.id === chatId);
       const previous = chats[index];
-      const message = { role: 'user', content: content.trim() };
-      const context = [...(previous?.messages.slice(-30) ?? []), message];
+      const message = { role: 'user', content: content.trim(),
+        ...(attachments.length ? { attachments: attachments.map(({ name, text }) => ({ name, text })) } : {}) };
+      const context = [...(previous?.messages.slice(-30) ?? []), message]
+        .map(turn => ({ role: turn.role, content: withAttachments(turn) }));
       while (context.reduce((length, turn) => length + turn.content.length, 0) > 180000) context.splice(0, 2);
-      const connection = await aiConnection();
       let partial = '';
-      sendPhase('waiting');
-      const result = await exaone.chat(connection, context, effort, controller.signal, text => {
+      const result = await exaone.queuedChat(aiConnection, context, effort, controller.signal, text => {
         partial += text;
         if (!controller.signal.aborted && window && !window.isDestroyed()) {
           window.webContents.send('launcher:aiText', requestId, text);
         }
       }, rateLimit => {
-        if (current !== account) return;
+        if ((current || serverSession) !== account || !serverSession) return;
         account.rateLimit = rateLimit;
         publish();
-      }, { onPhase: sendPhase }).catch(error => {
+      }, { retryAt: account.rateLimit?.retryAt, onPhase: sendPhase }).catch(error => {
         if (!controller.signal.aborted) throw error;
         return { answer: partial, tokens: undefined };
       });
       if (!result.answer.trim()) return null;
-      if (!quitting && current === account) {
+      if (!quitting && (current || serverSession) === account && !!serverSession) {
         sendPhase('saving');
         const chat = {
           ...previous,
           id: chatId,
-          title: previous?.title ?? message.content.replace(/\s+/gu, ' ').slice(0, 45),
+          title: previous?.title ?? (message.content || message.attachments?.[0]?.name || '새 대화').replace(/\s+/gu, ' ').slice(0, 45),
           messages: [...(previous?.messages ?? []), message, { role: 'assistant', content: result.answer }]
         };
         const next = chats.slice();
@@ -1580,17 +1743,17 @@ function registerHandlers() {
         else next[index] = chat;
         await saveAiHistory(history, next);
       }
-      if (current === account) {
+      if ((current || serverSession) === account && !!serverSession) {
         account.tokens = result.tokens;
         publish();
       }
-      return current === account ? result.answer : null;
+      return (current || serverSession) === account && !!serverSession ? result.answer : null;
     } finally {
       aiChatJob = undefined;
     }
   });
   bind('aiTitle', async chatId => {
-    const account = needConnection();
+    const account = needAiAccount();
     const history = account.chatHistory;
     const chats = history?.chats;
     const index = chats?.findIndex(chat => chat.id === chatId) ?? -1;
@@ -1604,15 +1767,15 @@ function registerHandlers() {
     job.task = (async () => {
       const connection = await aiConnection();
       const title = await exaone.summarizeTitle(connection, chat.messages, controller.signal, rateLimit => {
-        if (controller.signal.aborted || current !== account) return;
+        if (controller.signal.aborted || (current || serverSession) !== account || !serverSession) return;
         account.rateLimit = rateLimit;
         publish();
       });
-      if (!title || controller.signal.aborted || current !== account || quitting) return null;
+      if (!title || controller.signal.aborted || (current || serverSession) !== account || !serverSession || quitting) return null;
       const next = chats.slice();
       next[index] = { ...chat, title, summarized: true };
       await saveAiHistory(history, next);
-      return current === account ? title : null;
+      return (current || serverSession) === account && !!serverSession ? title : null;
     })();
     try {
       return await job.task;
@@ -1620,7 +1783,7 @@ function registerHandlers() {
       aiTitleJob = undefined;
     }
   });
-  bind('aiCancel', () => { needConnection(); aiChatJob?.abort(); });
+  bind('aiCancel', () => { needAiAccount(); aiChatJob?.abort(); });
   bind('serverFileAdd', async input => {
     const files = serverFiles();
     const name = typeof input?.name === 'string' ? input.name.trim() : '';
@@ -1736,6 +1899,15 @@ function registerHandlers() {
     const { data } = serverProject(id);
     await fs.mkdir(data, { recursive: true, mode: 0o700 });
     if (await shell.openPath(data)) throw new Error('서버 데이터 폴더를 열 수 없습니다.');
+  });
+  bind('serverMonitorCheck', async targetId => {
+    const session = needServerSession();
+    if (!net.isOnline()) throw new Error('인터넷 연결을 확인하세요.');
+    if (targetId !== undefined && !monitoringSettings(session).targets.some(target => target.id === targetId)) {
+      throw new Error('등록된 서비스를 선택하세요.');
+    }
+    if (session.monitor) await runServerMonitoring(session, session.monitor, targetId);
+    return status();
   });
   bind('serverMonitorSettings', async input => {
     const session = needServerSession();
@@ -1894,9 +2066,14 @@ function registerHandlers() {
     return github.latestCommit(repository, '', await githubToken(connection, account), connection.abort.signal);
   });
   bind('githubTrack', async (repository, track) => {
-    const account = githubAccount(needConnection(), repository);
+    const connection = needConnection();
+    const account = githubAccount(connection, repository);
     github.repositoryPath(repository);
     if (track === true && !account.tracked.includes(repository)) {
+      await github.requireRepositoryAccess(repository, await githubToken(connection, account), connection.abort.signal);
+      connection.abort.signal.throwIfAborted();
+      if (workspace(connection).github !== account) throw new Error('GitHub 연결이 변경됐습니다. 다시 시도하세요.');
+      if (account.tracked.includes(repository)) return;
       if (account.tracked.length >= 30) throw new Error('최대 30개 저장소를 표시할 수 있습니다.');
       account.tracked.push(repository);
     } else if (track === false) {
@@ -2225,6 +2402,82 @@ function registerHandlers() {
     await operate(connection, (store, signal) => store.mkdir(location, name, signal));
     return true;
   });
+  bind('renameFile', async (folder, selected, input) => {
+    const connection = needConnection();
+    requireRemoteWrites(connection);
+    const location = remotePath(folder);
+    if (location === '/') throw new Error('공유 폴더 안에서 이름을 바꿀 항목을 선택하세요.');
+    const name = writableName(typeof input === 'string' ? input.trim() : '');
+    const { entries: [entry] } = await selectedEntries(connection, 'remote', location, [selected]);
+    if (entry.name === name) return true;
+    await operate(connection, async (store, signal) => {
+      await requireUnusedName(store, location, name, signal, entry.path);
+      requireRemoteWrites(connection);
+      await store.rename(location, entry, name, signal);
+    });
+    return true;
+  });
+  bind('extractArchive', async (folder, selected, destination = 'folder') => {
+    const connection = needConnection();
+    requireRemoteWrites(connection);
+    const location = remotePath(folder);
+    if (location === '/') throw new Error('공유 폴더 안에서 ZIP 파일을 선택하세요.');
+    const { entries: [entry] } = await selectedEntries(connection, 'remote', location, [selected]);
+    if (entry.directory || !/\.zip$/iu.test(entry.name)) throw new Error('ZIP 파일을 선택하세요.');
+    if (destination !== 'here' && destination !== 'folder') throw new Error('압축을 풀 위치를 선택하세요.');
+    const name = destination === 'folder' ? writableName(entry.name.slice(0, -4)) : null;
+    if (name) await operate(connection, (store, signal) => requireUnusedName(store, location, name, signal));
+    if (connection.profile.provider === 'synology') return extractOnSynology(connection, location, entry, name);
+    const archiveLimit = 128 * 1024 ** 2;
+    if (entry.size > archiveLimit) throw new Error('WebDAV에서는 128 MiB 이하의 ZIP 파일만 압축을 풀 수 있습니다.');
+    const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'sonac-extract-'));
+    const stagingName = 'sonac-extract-' + randomUUID();
+    const staging = { path: childPath(location, stagingName), directory: true };
+    let staged = false;
+    try {
+      const archive = await operate(connection, async (store, signal) => {
+        const response = await store.download(entry.path, signal);
+        if (!response.body) throw new Error('NAS가 ZIP 내용을 반환하지 않았습니다.');
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of response.body) {
+          size += chunk.length;
+          if (size > archiveLimit) throw new Error('128 MiB 이하의 ZIP 파일만 압축을 풀 수 있습니다.');
+          chunks.push(chunk);
+        }
+        return Buffer.concat(chunks, size);
+      });
+      await deployment.extractZip(archive, temp, connection.abort.signal, {
+        limit: 256 * 1024 ** 2, entryLimit: 2000, validatePart: writableName, preserveDirectories: true
+      });
+      requireRemoteWrites(connection);
+      if (!name) {
+        const paths = await fs.readdir(temp);
+        const entries = await operate(connection, (store, signal) => store.list(location, signal));
+        const existing = new Set(entries.map(item => item.name.normalize('NFC').toLowerCase()));
+        if (paths.some(item => existing.has(item.normalize('NFC').toLowerCase()))) {
+          throw new Error('같은 이름의 파일 또는 폴더가 이미 있습니다.');
+        }
+        await uploadExtractedFiles(connection, temp, location);
+        return null;
+      }
+      await operate(connection, (store, signal) => store.mkdir(location, stagingName, signal));
+      staged = true;
+      await uploadExtractedFiles(connection, temp, staging.path);
+      await operate(connection, async (store, signal) => {
+        await requireUnusedName(store, location, name, signal);
+        requireRemoteWrites(connection);
+        await store.rename(location, staging, name, signal);
+      });
+      staged = false;
+      return name;
+    } finally {
+      if (staged && !connection.abort.signal.aborted && connection.remoteWrites) {
+        await operate(connection, (store, signal) => store.delete(staging, signal)).catch(() => {});
+      }
+      await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
+    }
+  });
   bind('download', async (folder, paths) => {
     const connection = needConnection();
     const { entries } = await selectedEntries(connection, 'remote', folder, paths);
@@ -2294,6 +2547,99 @@ function registerHandlers() {
     }
     return result;
   });
+  bind('mediaFolder', async (kind, folder) => {
+    if (!['audio', 'video'].includes(kind)) throw new Error('플레이어를 확인하세요.');
+    const connection = needConnection();
+    const location = remotePath(folder);
+    const scans = connection.mediaScans ??= new Map();
+    scans.get(kind)?.abort();
+    const controller = new AbortController();
+    scans.set(kind, controller);
+    const signal = AbortSignal.any([connection.abort.signal, controller.signal]);
+    try {
+      const list = target => operate(connection, (store, sessionSignal) =>
+        store.list(target, AbortSignal.any([signal, sessionSignal])));
+      const library = await scanMediaFolders(location, list, signal, kind);
+      signal.throwIfAborted();
+      const settings = workspace(connection);
+      if (settings.mediaFolders?.[kind] !== location) {
+        const previous = settings.mediaFolders;
+        const next = { ...previous, [kind]: location };
+        settings.mediaFolders = next;
+        try { await persist(); }
+        catch (error) {
+          if (settings.mediaFolders === next) settings.mediaFolders = previous;
+          throw error;
+        }
+        signal.throwIfAborted();
+        publish();
+      }
+      return library;
+    } finally {
+      if (scans.get(kind) === controller) scans.delete(kind);
+    }
+  });
+  bind('mediaPlay', async (id, kind, folder, item, audioSlot, coverPath) => {
+    if (typeof id !== 'string' || !/^[\da-f-]{36}$/iu.test(id) || !['audio', 'video'].includes(kind)) {
+      throw new Error('재생할 파일을 선택하세요.');
+    }
+    if (kind === 'audio' && ![0, 1].includes(audioSlot)) throw new Error('음악 재생 위치를 확인하세요.');
+    const slot = kind === 'audio' ? 'audio-' + audioSlot : kind;
+    const connection = needConnection();
+    const requests = connection.mediaRequests ??= new Map();
+    requests.get(slot)?.controller.abort();
+    const job = { id, controller: new AbortController() };
+    requests.set(slot, job);
+    const signal = AbortSignal.any([connection.abort.signal, job.controller.signal]);
+    try {
+      const { entries: [entry] } = await selectedEntries(connection, 'remote', folder, [item]);
+      signal.throwIfAborted();
+      return await createPreview(id, entry, {
+        player: kind, slot, signal,
+        metadata: kind === 'audio' ? async filename => {
+          const tags = await musicTags(filename);
+          signal.throwIfAborted();
+          if (!tags.cover && typeof coverPath === 'string') {
+            try {
+              const { entries: [cover] } = await selectedEntries(connection, 'remote', folder, [coverPath]);
+              if (coverFile(cover)) {
+                tags.cover = await readArtwork(await operate(connection, (store, sessionSignal) =>
+                  store.download(cover.path, AbortSignal.any([signal, sessionSignal, AbortSignal.timeout(4000)]))));
+              }
+            } catch { signal.throwIfAborted(); }
+          }
+          return tags;
+        } : undefined,
+        download: abort => operate(connection, (store, sessionSignal) =>
+          store.download(entry.path, AbortSignal.any([abort, sessionSignal])))
+      });
+    } finally {
+      if (requests.get(slot) === job) requests.delete(slot);
+    }
+  });
+  bind('mediaCompatible', id => {
+    if (typeof id !== 'string' || !/^[\da-f-]{36}$/iu.test(id)) throw new Error('영상을 다시 선택하세요.');
+    return compatibleVideo(id, needConnection().abort.signal);
+  });
+  bind('mediaSubtitle', async (folder, item) => {
+    const connection = needConnection();
+    const { entries: [entry] } = await selectedEntries(connection, 'remote', folder, [item]);
+    const limit = 2 * 1024 ** 2;
+    if (entry.directory || !/\.(?:srt|vtt|ass|ssa|smi)$/iu.test(entry.name) || entry.size > limit) {
+      throw new Error('2 MiB 이하의 SRT, VTT, ASS, SSA 또는 SMI 자막을 선택하세요.');
+    }
+    const response = await operate(connection, (store, signal) => store.download(entry.path, signal));
+    if (!response.body) throw new Error('자막 파일을 읽을 수 없습니다.');
+    const chunks = [];
+    let length = 0;
+    for await (const chunk of response.body) {
+      length += chunk.length;
+      if (length > limit) throw new Error('자막 파일이 2 MiB를 초과합니다.');
+      chunks.push(chunk);
+    }
+    connection.abort.signal.throwIfAborted();
+    return Uint8Array.from(Buffer.concat(chunks, length));
+  });
   bind('preview', async (id, source, folder, item) => {
     const connection = needConnection();
     if (!/^[\da-f-]{36}$/iu.test(id) || !['local', 'remote'].includes(source)) {
@@ -2308,10 +2654,17 @@ function registerHandlers() {
         store.download(entry.path, AbortSignal.any([abort, signal])))
     });
   });
-  bind('closePreview', clearPreview);
+  bind('closePreview', id => {
+    if (typeof id !== 'string' || !/^[\da-f-]{36}$/iu.test(id)) return;
+    for (const job of current?.mediaRequests?.values() ?? []) {
+      if (job.id === id) job.controller.abort();
+    }
+    return clearPreview(id);
+  });
   bind('openLink', async action => {
     const connection = action === 'serverGitHubToken' ? null : needConnection();
     if (action === 'serverGitHubToken') needServerSession();
+    if (action === 'githubClassicToken') return shell.openExternal('https://github.com/settings/tokens/new?scopes=repo');
     if (action === 'githubToken' || action === 'serverGitHubToken') {
       return shell.openExternal('https://github.com/settings/personal-access-tokens/new?name=sonac%20launcher&contents=read&metadata=read');
     }
@@ -2323,7 +2676,7 @@ function registerHandlers() {
     await shell.openExternal(url.href);
   });
   bind('terminal', async () => {
-    needConnection();
+    needTerminalSession();
     if (activePrompt) throw new Error('열려 있는 확인창을 먼저 닫으세요.');
     if (terminalView) {
       terminalView.webContents.focus();
@@ -2381,7 +2734,7 @@ function registerHandlers() {
     return saveTerminalCommands(commands.filter(item => item.id !== id));
   }, 'terminal');
   bind('terminalStart', (id, cols, rows) => {
-    needConnection();
+    needTerminalSession();
     if (!Number.isSafeInteger(id) || id < 1 || terminalSessions.has(id)) throw new Error('터미널 탭을 확인하세요.');
     if (terminalSessions.size >= terminalTabLimit) throw new Error('터미널 탭은 최대 8개까지 열 수 있습니다.');
     terminalSize(cols, rows);
@@ -2450,6 +2803,15 @@ async function finishQuit() {
   await clearPreview();
   await current?.store.logout();
   await writeQueue.catch(() => {});
+  if (trashDataOnQuit) {
+    try {
+      await Promise.all(['launcher', 'terminal', 'prompt', 'default'].map(partition =>
+        (partition === 'default' ? session.defaultSession : session.fromPartition(partition)).clearStorageData()));
+      await shell.trashItem(app.getPath('userData'));
+    } catch (error) {
+      await showError('로컬 데이터를 모두 지우지 못했습니다', displayError(error));
+    }
+  }
   app.quit();
 }
 

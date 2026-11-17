@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { setImmediate: nextTurn } = require('node:timers/promises');
 const test = require('node:test');
 const undici = require('undici');
-const { chat, summarizeTitle, relayEndpoint } = require('../src/exaone');
+const { chat, queuedChat, summarizeTitle, relayEndpoint } = require('../src/exaone');
 
 const messages = [{ role: 'user', content: 'Hello' }];
 
@@ -98,6 +98,35 @@ test('EXAONE reports a retry deadline even when a 429 rejects the chat request',
     { window: 'second', limit: 1, remaining: 0 },
     { window: 'day', limit: 86400, remaining: 86300 }
   ] }]);
+});
+
+test('a queued message retries a 429 once and delivers one answer', async t => {
+  let calls = 0;
+  t.mock.method(undici, 'fetch', async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body).messages, messages);
+    if (++calls === 1) return new Response(null, { status: 429, headers: { 'retry-after-ms': '10' } });
+    return new Response('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\ndata: [DONE]\n', {
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  });
+  const phases = [];
+  const text = [];
+  const result = await queuedChat(() => 'test-key', messages, 'low', new AbortController().signal,
+    value => text.push(value), () => {}, { onPhase: phase => phases.push(phase) });
+  assert.equal(result.answer, 'Hi');
+  assert.deepEqual(text, ['Hi']);
+  assert.deepEqual(phases.slice(0, 3), ['waiting', 'queued', 'waiting']);
+  assert.equal(calls, 2);
+});
+
+test('a queued message can be cancelled before contacting EXAONE', async () => {
+  const controller = new AbortController();
+  const result = queuedChat(() => assert.fail('cancelled message must not connect'), messages, 'low',
+    controller.signal, () => {}, () => {}, {
+      retryAt: Date.now() + 5000,
+      onPhase(phase) { if (phase === 'queued') controller.abort(); }
+    });
+  await assert.rejects(result, { name: 'AbortError' });
 });
 
 test('EXAONE lets a stream run past the original deadline while reasoning arrives', async t => {

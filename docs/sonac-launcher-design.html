@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SONAC LAUNCHER 디자인 · 레이아웃 · 모션</title>
+<style>
+:root {
+  color-scheme:dark;
+  font-family:"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;
+  background:#0f1013;
+  color:#ecedef;
+  --panel:#15171c;
+  --line:#23262d;
+  --muted:#9ba1ad;
+  --blue:#2f66d8;
+  --page:cubic-bezier(.22,1,.36,1);
+  --spring:cubic-bezier(.34,1.56,.64,1);
+}
+* {
+  box-sizing:border-box;
+}
+body {
+  margin:0;
+}
+main {
+  max-width:1160px;
+  margin:auto;
+  padding:40px clamp(16px,4vw,44px) 64px;
+}
+h1 {
+  font-size:clamp(28px,4vw,44px);
+  line-height:1.2;
+  letter-spacing:-.035em;
+  margin:0 0 14px;
+}
+h2 {
+  font-size:24px;
+  margin:36px 0 14px;
+  scroll-margin-top:1rem;
+}
+h3,p {
+  margin:0;
+}
+p,li,td {
+  line-height:1.6;
+}
+p,li {
+  color:#c7cbd4;
+}
+nav {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:20px 0 8px;
+}
+a,button {
+  color:inherit;
+}
+nav a,button {
+  border:0;
+  background:#1e2430;
+  border-radius:12px;
+  text-decoration:none;
+  padding:8px 12px;
+  font:inherit;
+  font-size:14px;
+}
+button {
+  cursor:pointer;
+  transition:background-color .15s ease-out,scale .15s ease-out;
+}
+button:hover {
+  background:#272e3d;
+}
+button:active {
+  scale:.96;
+}
+:focus-visible {
+  outline:3px solid #8ab4ff;
+  outline-offset:2px;
+}
+.table-scroll {
+  overflow:auto;
+  border:1px solid var(--line);
+  border-radius:14px;
+}
+table {
+  border-collapse:collapse;
+  width:100%;
+  text-align:left;
+}
+th,td {
+  padding:11px 14px;
+  vertical-align:top;
+}
+th {
+  background:#1e2430;
+}
+td {
+  border-top:1px solid var(--line);
+}
+td:first-child {
+  min-width:135px;
+  font-weight:650;
+  color:#ecedef;
+}
+td:not(:first-child) {
+  color:#c7cbd4;
+}
+code {
+  color:#aac9ff;
+  overflow-wrap:anywhere;
+}
+li+li {
+  margin-top:6px;
+}
+.examples {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+.example {
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:18px;
+  min-width:0;
+  overflow:hidden;
+}
+.example header {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:12px 14px;
+}
+.example h3 {
+  font-size:16px;
+}
+.stage {
+  background:#101216;
+  min-height:162px;
+  padding:16px;
+}
+.login-sample,.files-sample,.video-sample {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+.sample-input {
+  border:1px solid #292e38;
+  background:#15171c;
+  color:var(--muted);
+  margin-top:8px;
+  padding:6px 8px;
+  border-radius:10px;
+  font-size:12px;
+}
+.tiles {
+  display:flex;
+  flex-wrap:wrap;
+  align-content:start;
+  gap:10px;
+  text-align:center;
+  font-size:12px;
+}
+.login-sample .tiles,.sample-home .tiles {
+  margin-top:8px;
+}
+.tiles>span {
+  min-width:52px;
+}
+.tile {
+  display:grid;
+  place-items:center;
+  width:52px;
+  aspect-ratio:1;
+  margin:0 auto 4px;
+  border-radius:27%;
+  font-size:26px;
+  color:#fff;
+  transition:translate .45s var(--spring),scale .45s var(--spring);
+}
+.tile:hover {
+  translate:0 -6px;
+  scale:1.04;
+}
+.nas {
+  background:#2d68db;
+}
+.updater {
+  background:#a5551e;
+}
+.video {
+  background:#3560b8;
+}
+.audio {
+  background:#7a52ba;
+}
+.ai {
+  background:#6240c0;
+}
+.files-sample {
+  grid-template-columns:auto 1fr;
+}
+.files-sample aside {
+  border-right:1px solid var(--line);
+  padding-right:12px;
+  font-size:13px;
+  line-height:1.75;
+  color:var(--muted);
+}
+.file-grid {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}
+.file-grid span,.sample-folders details {
+  background:#1e2430;
+  border-radius:10px;
+  padding:6px 9px;
+}
+.music-sample {
+  position:relative;
+  overflow:hidden;
+}
+.sample-home {
+  transition:translate .54s var(--page);
+}
+.sample-drawer {
+  position:absolute;
+  inset:0 0 0 auto;
+  width:57%;
+  padding:16px;
+  background:#0b0d12;
+  border-left:1px solid var(--line);
+  translate:100% 0;
+  visibility:hidden;
+  transition:translate .54s var(--page),visibility 0s linear .54s;
+}
+.sample-drawer p {
+  font-size:13px;
+  margin:7px 0;
+}
+.music-sample.open .sample-home {
+  translate:-10px 0;
+}
+.music-sample.open .sample-drawer {
+  translate:0 0;
+  visibility:visible;
+  transition-delay:0s;
+}
+.music-sample.open .sample-drawer>* {
+  animation:music-reveal .5s var(--page) both;
+}
+.music-sample.open .sample-drawer p {
+  animation-delay:.085s;
+}
+@keyframes music-reveal {
+  from {
+    opacity:0;
+    transform:translateY(10px);
+  }
+}
+.video-sample {
+  grid-template-columns:2fr 1fr;
+}
+.sample-screen {
+  display:grid;
+  place-items:center;
+  aspect-ratio:16/9;
+  background:#08090c;
+  border-radius:12px 12px 0 0;
+  color:#9ba1ad;
+  font-size:26px;
+}
+.sample-transport {
+  display:flex;
+  gap:8px;
+  justify-content:space-between;
+  padding:6px;
+  background:#14171d;
+  font-size:11px;
+}
+.sample-folders {
+  display:grid;
+  gap:6px;
+  align-content:start;
+}
+.sample-folders summary {
+  cursor:pointer;
+  font-size:13px;
+}
+.sample-folders p {
+  font-size:12px;
+  overflow-wrap:anywhere;
+}
+.sample-notice-stage {
+  display:grid;
+  place-items:end center;
+}
+.sample-notice {
+  display:flex;
+  width:68px;
+  height:68px;
+  border-radius:34px;
+  background:#20242d;
+  overflow:hidden;
+  align-items:center;
+  gap:12px;
+  padding:10px;
+  opacity:0;
+  transform:scale(0);
+  transition:transform .5s var(--spring),opacity .25s .15s,width .65s cubic-bezier(.34,1.25,.64,1);
+}
+.sample-notice.visible {
+  opacity:1;
+  transform:scale(1);
+}
+.sample-notice.expanded {
+  width:min(100%,420px);
+}
+.notice-mark {
+  display:grid;
+  place-items:center;
+  background:var(--blue);
+  width:48px;
+  height:48px;
+  flex:none;
+  border-radius:16px;
+  font-size:22px;
+}
+.notice-info {
+  flex:1;
+  min-width:0;
+}
+.notice-info,#sample-percent {
+  opacity:0;
+}
+.expanded .notice-info,.expanded #sample-percent {
+  opacity:1;
+  transition:opacity .4s .3s var(--page);
+}
+.meter {
+  height:5px;
+  border-radius:99px;
+  background:#1e2430;
+  overflow:hidden;
+  margin-top:8px;
+}
+.meter span {
+  display:block;
+  width:0;
+  height:100%;
+  background:var(--blue);
+  transition:width .3s linear;
+}
+.sr-only {
+  position:absolute;
+  clip-path:inset(50%);
+  width:1px;
+  height:1px;
+  overflow:hidden;
+}
+@media(max-width:720px) {
+  .examples {
+    grid-template-columns:1fr;
+  }
+  main {
+    padding-top:24px;
+  }
+  th,td {
+    padding:9px;
+  }
+  td:first-child {
+    min-width:105px;
+  }
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after {
+    animation:none!important;
+    transition:none!important;
+  }
+  .tile:hover {
+    translate:none;
+    scale:none;
+  }
+}
+</style></head><body><main>
+<h1>SONAC LAUNCHER 디자인 · 레이아웃 · 모션</h1>
+<p>기준은 표시 버전 a0.3.9.3 이후의 작업 트리입니다. NAS ZIP 압축 풀기 옵션, 중계 서버를 사용하는 AI, 폴더별 영상 목록과 대용량 영상 재생 변경을 포함합니다.</p><nav aria-label="목차"><a href="#samples">미리보기</a><a href="#tokens">공통 디자인</a><a href="#layouts">화면별 레이아웃</a><a href="#motion">모션</a><a href="#responsive">반응형·접근성</a><a href="#source">원본 위치</a></nav>
+<section aria-labelledby="samples">
+<h2 id="samples">레이아웃과 모션 미리보기</h2>
+<div class="examples">
+  <article class="example">
+    <header><h3>시작 화면</h3><button type="button" id="switch-login">서버 업데이터 열기</button></header>
+    <div class="login-sample stage">
+      <div><strong>SONAC LAUNCHER</strong><div class="tiles"><span><span class="tile nas" aria-hidden="true">▤</span>저장소</span><span><span class="tile updater" aria-hidden="true">↻</span>서버 업데이터</span></div></div>
+      <div id="login-card" aria-live="polite"><strong>NAS 로그인</strong><div class="sample-input">사용자 이름</div><div class="sample-input">비밀번호</div></div>
+    </div>
+  </article>
+  <article class="example">
+    <header><h3>NAS 홈 타일</h3><button type="button" id="replay-tiles">등장 모션 다시 보기</button></header>
+    <div class="tiles stage" id="home-tiles">
+      <span><span class="tile nas" aria-hidden="true">▤</span>파일 스테이션</span>
+      <span><span class="tile video" aria-hidden="true">▷</span>영상</span>
+      <span><span class="tile audio" aria-hidden="true">♫</span>음악</span>
+      <span><span class="tile ai" aria-hidden="true">✧</span>AI</span>
+    </div>
+  </article>
+  <article class="example">
+    <header><h3>파일 스테이션</h3><button type="button" id="change-folder">다른 폴더 열기</button></header>
+    <div class="files-sample stage">
+      <aside>공유 폴더<br>즐겨찾기</aside>
+      <div><strong id="sample-path" aria-live="polite">공유 폴더 / 영상</strong><div class="file-grid" id="sample-files"><span>▱ 공연</span><span>▱ 영화</span></div></div>
+    </div>
+  </article>
+  <article class="example">
+    <header><h3>음악 플레이어</h3><button type="button" id="toggle-music" aria-expanded="false" aria-controls="music-demo">플레이어 열기</button></header>
+    <div class="music-sample stage">
+      <div class="sample-home"><strong>NAS 홈</strong><div class="tiles"><span class="tile nas" aria-hidden="true">▤</span><span class="tile audio" aria-hidden="true">♫</span></div></div>
+      <div class="sample-drawer" id="music-demo" inert><strong>음악 플레이어</strong><p>앨범 · 현재 곡</p><div class="meter"><span style="width:45%"></span></div><p>▸ 다음 곡</p></div>
+    </div>
+  </article>
+  <article class="example">
+    <header><h3>영상 플레이어</h3></header>
+    <div class="video-sample stage">
+      <div><div class="sample-screen" aria-label="영상 영역">▷</div><div class="sample-transport">▷ &nbsp; 00:00 / 02:40 <span>볼륨 · 전체 화면</span></div><div class="sample-input">NAS 자막 · 자막 파일 열기</div></div>
+      <div class="sample-folders"><details open><summary>공연 · 2</summary><p>공연 01.mkv</p><p>공연 02.mkv</p></details><details><summary>영화 · 1</summary><p>영화.mp4</p></details></div>
+    </div>
+  </article>
+  <article class="example">
+    <header><h3>하단 업데이트 알림</h3><button type="button" id="replay-update">알림 다시 보기</button></header>
+    <div class="sample-notice-stage stage">
+      <div id="sample-notice" class="sample-notice"><span class="notice-mark" aria-hidden="true">↓</span><div class="notice-info"><strong>업데이트 다운로드</strong><div class="meter"><span id="sample-progress"></span></div></div><span id="sample-percent">0%</span></div>
+      <span id="notice-state" class="sr-only" role="status"></span>
+    </div>
+  </article>
+</div>
+</section>
+<h2 id="tokens">공통 디자인</h2>
+<div class="table-scroll"><table><thead>
+<tr><th>항목</th><th>현재 값과 사용 위치</th></tr>
+</thead><tbody>
+<tr><td>글꼴</td><td>Apple SD Gothic Neo → Malgun Gothic → Noto Sans KR → system-ui → sans-serif. OS에 따라 글꼴이 달라집니다.</td></tr>
+<tr><td>바탕과 패널</td><td>배경 <code>#0f1013</code>, 패널 <code>#15171c</code>, 구분선 <code>#23262d</code>, 강조 테두리 <code>#3a3f4b</code></td></tr>
+<tr><td>텍스트</td><td>기본 <code>#ecedef</code>, 보조 <code>#9ba1ad</code>, 포커스 <code>#8ab4ff</code>, 오류 <code>#ffb2ab</code></td></tr>
+<tr><td>버튼</td><td>기본 <code>#1e2430</code>, 기본 동작 <code>#2f66d8</code>, 삭제 <code>#3a2024</code>. 높이 36·44·52px, 모서리 12·14·18px. 일반 버튼에 2px 간격의 3px 포커스 외곽선.</td></tr>
+<tr><td>앱 타일</td><td>정사각형, 기본 모서리 27%, NAS 홈 타일 최대 132px·모서리 28%. 라벨은 아래 중앙에 둡니다.</td></tr>
+<tr><td>타일 색</td><td>NAS <code>#2d68db</code>, 다운로드 <code>#6d3ad9</code>, 백업·서버 업데이터 <code>#a5551e</code>, GitHub <code>#b34a20</code>, 터미널 <code>#15171c</code>, AI <code>#6240c0</code>, 영상 <code>#3560b8</code>, 음악 <code>#7a52ba</code></td></tr>
+<tr><td>상태 표시</td><td>기본 8px 점. 대기 <code>#8995a9</code>, 정상 <code>#4ade80</code>, 진행 <code>#74a8ff</code>, 주의 <code>#ffad72</code>. 서비스마다 상태 이름을 함께 표시합니다.</td></tr>
+<tr><td>창과 여백</td><td>본문 최소 너비 340px. macOS는 상단 40px를 창 드래그 영역으로 사용합니다. 대화상자 기본 최대 520px, 와이드 최대 860px, 배경 딤 적용.</td></tr>
+</tbody></table></div>
+<h2 id="layouts">화면별 레이아웃</h2>
+<div class="table-scroll"><table><thead>
+<tr><th>화면</th><th>배치와 조작</th></tr>
+</thead><tbody>
+<tr><td>첫 실행</td><td>중앙 단계 카드. 환영 → NAS만·서버 업데이터만·둘 다 선택 → 계정 연결 → 완료. 둘 다 선택하면 계정 연결 단계가 두 번 표시됩니다. 하단 단계 점과 이동 버튼.</td></tr>
+<tr><td>시작 · NAS 로그인</td><td>왼쪽에 SONAC LAUNCHER 로고, 저장소·Synology 추가·서버 업데이터 타일. 오른쪽에 선택한 NAS 로그인 또는 NAS 등록·수정. 등록·수정 양식은 긴 입력 항목에 맞춰 오른쪽에서 세로 중앙 배치. 우측 상단 업데이트·설정, 하단 오른쪽에 버전.</td></tr>
+<tr><td>시작 · 서버 업데이터</td><td>시작 화면의 왼쪽 타일을 사용합니다. 오른쪽 패널은 서비스 상태와 서버 업데이터 로그인 사이에서 전환됩니다. 로그인 화면 제목과 왼쪽 로고가 뷰 변경 중 갑자기 재배치되지 않도록 오른쪽 패널만 움직입니다.</td></tr>
+<tr><td>NAS 홈</td><td>상단에 워드마크와 동기화·설정 등 계정 도구. 가운데 그룹별 앱 아이콘, 아래에 동기화 파일과 영역 추가 버튼. 넓은 창에서 그룹은 6열 격자를 사용하고 2개 타일 그룹은 2열을 차지합니다.</td></tr>
+<tr><td>파일 스테이션 · 폴더 선택</td><td>왼쪽 탐색과 즐겨찾기, 오른쪽에 경로 표시·상위 폴더·새로고침·업로드, 선택 작업 도구 모음, 목록/격자와 하단 항목 수. 우클릭 메뉴에서 사용 가능한 선택 작업을 다시 제공합니다. 폴더 선택 모드에서는 파일 작업 대신 현재 폴더를 선택합니다.</td></tr>
+<tr><td>파일 작업 대화상자</td><td>새 폴더, 이름 바꾸기, ZIP 압축 풀기, 파일 미리보기. 이름 바꾸기는 기존 파일명을 채웁니다. ZIP은 현재 위치 또는 ZIP 이름의 새 폴더를 고릅니다. 업로드·다운로드·압축 풀기 진행은 하단 알림에 표시합니다.</td></tr>
+<tr><td>백업 · 동기화</td><td>홈에 폴더 아이콘과 동기화 영역을 표시. 그룹을 열면 내부 항목을 격자로 표시합니다. 그룹 추가·편집, 동기화 항목 추가·수정, NAS·로컬 폴더 선택은 각각의 대화상자에서 처리합니다.</td></tr>
+<tr><td>GitHub</td><td>상단 계정·연결 제어, 본문 프로젝트 선택과 등록된 프로젝트 목록. 프로젝트별 GitHub 열기와 연결 관리.</td></tr>
+<tr><td>서버 업데이터 홈</td><td>헤더에 계정과 홈·설정·로그아웃. 서버·터미널·AI 타일을 중앙에 배치하고 프로젝트가 늘면 줄바꿈합니다. 아래 실행 서버·운영 웹페이지·마지막 업데이트 요약, 배포 프로젝트, 운영 중인 웹페이지 목록/격자.</td></tr>
+<tr><td>서버 프로젝트</td><td>카드에 프로젝트명, 상태, 버전과 출처 표시. 업데이트 버튼과 재생·정지·로그·GitHub 아이콘, 추가 작업 메뉴. GitHub 연결과 릴리스 ZIP 선택은 대화상자로 엽니다.</td></tr>
+<tr><td>터미널</td><td>상단 제목과 창 도구, 그 아래 세션 탭, 본문 터미널 카드. 명령 모음은 팝오버로 열리며 명령·관리 버튼을 제공합니다.</td></tr>
+<tr><td>AI 로그인</td><td>왼쪽에 보라색 AI 타일, 오른쪽에 Firebase 이메일·비밀번호 로그인과 뒤로가기. NAS 홈에서 AI 인증이 필요할 때 열립니다.</td></tr>
+<tr><td>AI 채팅</td><td>왼쪽에 대화·새 대화·사용량, 오른쪽에 모델·추론 강도와 대화. 아래 고정 입력 영역에 첨부 +, 메시지와 전송 버튼. 첨부 칩, 전송 대기, 생성 중, 오류를 입력 영역이나 대화에 표시합니다.</td></tr>
+<tr><td>설정</td><td>왼쪽 탐색, 오른쪽 섹션. 계정 및 연결, 런처, 미디어, 백업·동기화. 런처 업데이트 상태와 진행률은 앱 버전 옆 버튼에 표시됩니다. 기본 영상·음악 폴더 변경은 미디어 설정에서 합니다.</td></tr>
+<tr><td>음악 플레이어</td><td>NAS 홈 위 오른쪽에서 열리는 최대 420px 패널. 현재 곡·앨범 아트·제목과 아티스트, 재생·탐색·볼륨, 앨범별 곡 목록. 패널을 닫아도 현재 재생을 유지하며 헤더 버튼에서 다시 열 수 있습니다.</td></tr>
+<tr><td>영상 플레이어</td><td>상단 제목·기본 NAS 경로·홈. 왼쪽에 16:9 영상과 재생·시간·탐색·볼륨·전체 화면, 아래에 NAS/로컬 자막 조작. 오른쪽은 폴더 이름과 영상 수가 있는 접이식 목록. 영상과 목록의 최대 표시 높이는 65dvh입니다.</td></tr>
+</tbody></table></div>
+<h2 id="motion">모션 레퍼런스</h2>
+<p>시간은 현재 코드의 설정값입니다. <code>page</code>는 <code>cubic-bezier(.22,1,.36,1)</code>, <code>spring</code>은 <code>cubic-bezier(.34,1.56,.64,1)</code>을 뜻합니다.</p>
+<div class="table-scroll"><table><thead>
+<tr><th>대상</th><th>동작</th><th>시간과 보간</th></tr>
+</thead><tbody>
+<tr><td>일반 버튼·스위치</td><td>배경/텍스트/테두리 전환, 눌렀을 때 버튼 0.96배, 스위치 손잡이 이동</td><td>150ms ease-out</td></tr>
+<tr><td>홈 타일</td><td>아래 14px·투명·0.6배에서 등장. 타일별 시차와 페이지 진입 시차를 합산</td><td>600ms spring</td></tr>
+<tr><td>타일 호버·누름</td><td>위로 6px와 1.04배, 내부 아이콘 1.1배. 누르면 타일 0.96배</td><td>호버 450ms spring, 누름 120ms</td></tr>
+<tr><td>선택된 NAS 타일</td><td>푸른 테두리가 투명·0.88배에서 등장</td><td>400ms spring</td></tr>
+<tr><td>일반 페이지 전환</td><td>이전 뷰는 위로 10px·0.985배·블러 4px로 사라짐. 새 뷰는 아래 18px·0.985배·블러 6px에서 들어옴</td><td>퇴장 300ms, 진입 550ms 및 지연 260ms, page</td></tr>
+<tr><td>파일 스테이션 진입</td><td>사이드바는 왼쪽 28px에서 등장, 파일 영역은 0.94배에서 등장</td><td>각각 500ms, 600ms 및 지연 120ms, page</td></tr>
+<tr><td>파일 폴더 이동</td><td>이전 파일 목록 페이드 아웃, 새 파일 목록은 0.985배에서 등장</td><td>둘 다 300ms page</td></tr>
+<tr><td>시작 화면 패널 교체</td><td>오른쪽 카드만 아래 7px에서 올라오며 페이드 인. 여러 전환이 겹치면 이전 모션을 취소</td><td>220ms page</td></tr>
+<tr><td>로그인 로딩</td><td>오른쪽 폼이 왼쪽 16px로 사라지고 로딩 문구 표시, 원형 스피너 반복</td><td>폼 180ms ease-in/out, 로딩 200ms 및 지연 100ms, 스피너 850ms linear</td></tr>
+<tr><td>첫 실행 단계 이동</td><td>진행 방향에 맞춰 다음/이전 단계가 가로 36px 이동하며 페이드</td><td>나가는 단계 300ms, 들어오는 단계 450ms, page</td></tr>
+<tr><td>첫 실행 내부 요소</td><td>아래 14px에서 등장, 로고와 완료 아이콘은 0.6배에서 확대, 체크는 왼쪽부터 노출</td><td>요소 450ms page, 로고 600ms spring, 체크 500ms 및 지연 180ms page</td></tr>
+<tr><td>첫 실행 단계 점</td><td>현재 단계 점의 너비와 배경 색상 변경</td><td>너비 450ms spring, 색 180ms ease</td></tr>
+<tr><td>대화상자·파일 메뉴</td><td>아래 6px에서 페이드 인, 뒤 배경은 독립 페이드</td><td>190ms ease-out</td></tr>
+<tr><td>간단한 업데이트 알림</td><td>아래 12px·0.97배에서 등장, 닫힐 때 아래 8px로 이동</td><td>등장 350ms <code>cubic-bezier(.2,.9,.3,1.2)</code>, 퇴장 180ms ease-in</td></tr>
+<tr><td>런처 업데이트 진행·완료</td><td>68px 원 → 최대 560px 알림으로 펼침. 초기 표시 400ms, 펼침 1000ms 예약. 다운로드 완료 시 다시 시작 버튼 면으로 교체</td><td>확대 500ms spring, 펼친 너비 전환 650ms, 진행률 300ms linear</td></tr>
+<tr><td>NAS 전송·압축 풀기 알림</td><td>같은 하단 알림 모양을 사용. 런처 업데이트가 동시에 보일 때 위쪽에 배치. 완료 3초, 오류 8초 후 닫힘</td><td>진행률 300ms linear. 크기를 모르면 진행 표시의 막대가 1.2초마다 왕복</td></tr>
+<tr><td>터미널 진입</td><td>헤더·탭은 아래 14px에서 올라오고 터미널 카드는 0.97배에서 등장</td><td>헤더·탭 600ms page, 탭 지연 70ms, 카드 700ms page 및 지연 150ms</td></tr>
+<tr><td>터미널 새 탭·명령 팝오버</td><td>새 탭은 너비 0·0.8배에서 등장. 팝오버는 0.9배·위 8px에서 등장하고 명령 행이 순서대로 올라옴</td><td>탭·팝오버 500ms spring, 명령 행 450ms page, 팝오버 배경 페이드 300ms</td></tr>
+<tr><td>음악 패널</td><td>오른쪽 화면 밖에서 들어오며 홈은 왼쪽 10px 이동. 너비 1000px 이상에서 패널 자리만큼 홈의 우측 여백 확보</td><td>열기/닫기 540ms page, 닫을 때 540ms 뒤 숨김</td></tr>
+<tr><td>음악 패널 내부·재생 중</td><td>내용은 아래 10px에서 페이드. 기본 폴더·현재 곡·목록은 각각 40·85·130ms 지연. 재생 중 막대는 높이 0.35~1배 반복</td><td>내용 500ms page, 막대 1초 ease-in-out</td></tr>
+<tr><td>영상 로딩과 탐색</td><td>네트워크 로딩·버퍼링·탐색에 로딩 표시. 재생 가능·재생·탐색 완료 시 숨김</td><td>미디어 이벤트 기반. 고정 전환 시간 없음.</td></tr>
+</tbody></table></div>
+<h2 id="responsive">반응형과 접근성</h2>
+<ul>
+<li>700px 이하에서는 시작 화면이 한 열이 되고, 파일 스테이션 탐색과 AI 대화 목록이 위쪽으로 이동합니다.</li>
+<li>760px 이하에서는 영상 플레이어와 폴더 목록을 한 열로 쌓습니다. 서버 요약 카드는 650px 이하에서 한 열입니다.</li>
+<li>NAS 홈은 1120px 이상에서 그룹용 6열, 음악 패널은 1000px 이상에서 본문 여백을 확보합니다.</li>
+<li><code>prefers-reduced-motion</code>에서 CSS 애니메이션·전환을 끄고, JS의 페이지·로그인·첫 실행 애니메이션도 건너뜁니다. 로딩 문구, 선택 상태, 진행 숫자는 표시됩니다.</li>
+<li>주요 아이콘에는 이름이나 툴팁을 붙입니다. 선택과 패널 열림 여부는 <code>aria-pressed</code>, <code>aria-expanded</code>로 전달합니다. 숨겨진 영역은 필요한 경우 <code>inert</code>로 상호작용을 막습니다.</li>
+<li>HTML의 모션 샘플은 화면 구성과 동작 기록을 위한 축소 예시입니다. NAS 로그인, 영상 재생, 업데이트 연결은 실제 앱에서 실행합니다.</li>
+</ul>
+<h2 id="source">원본 위치</h2>
+<div class="table-scroll"><table><thead>
+<tr><th>파일</th><th>관리하는 내용</th></tr>
+</thead><tbody>
+<tr><td><code>src/ui/index.html</code></td><td>시작·홈·설정·파일·서버·AI·미디어 화면과 대화상자</td></tr>
+<tr><td><code>src/ui/style.css</code></td><td>디자인 토큰, 반응형 배치, 상태, keyframes</td></tr>
+<tr><td><code>src/ui/app.js</code></td><td>페이지 전환, 로그인 패널, 첫 실행 단계, 알림 타이머, 미디어 이벤트</td></tr>
+<tr><td><code>src/ui/icons.js</code></td><td>캔버스 아이콘 경로와 렌더링</td></tr>
+<tr><td><code>src/ui/terminal.html</code>, <code>src/ui/terminal-ui.mjs</code></td><td>별도 터미널 화면과 세션·명령 상호작용</td></tr>
+<tr><td><code>src/ui/prompt.html</code>, <code>src/ui/prompt.js</code></td><td>별도 확인 창과 버튼 처리</td></tr>
+</tbody></table></div>
+</main><script>
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const get = id => document.getElementById(id);
+function play(element, frames, duration, easing = 'cubic-bezier(.22,1,.36,1)', delay = 0) {
+  if (reducedMotion.matches || !element.animate) return;
+  element.getAnimations().forEach(animation => animation.cancel());
+  element.animate(frames, { duration, easing, delay, fill: 'backwards' });
+}
+get('switch-login').onclick = event => {
+  const title = get('login-card').querySelector('strong');
+  const server = title.textContent === 'NAS 로그인';
+  title.textContent = server ? '서버 업데이터 로그인' : 'NAS 로그인';
+  get('login-card').querySelector('.sample-input').textContent = server ? '이메일' : '사용자 이름';
+  event.currentTarget.textContent = server ? 'NAS 로그인 열기' : '서버 업데이터 열기';
+  play(get('login-card'), [{ opacity: 0, transform: 'translateY(7px)' }, { opacity: 1, transform: 'none' }], 220);
+};
+get('replay-tiles').onclick = () => {
+  get('home-tiles').querySelectorAll('.tile').forEach((tile, index) =>
+    play(tile, [{ opacity: 0, transform: 'translateY(14px) scale(.6)' }, { opacity: 1, transform: 'none' }],
+      600, 'cubic-bezier(.34,1.56,.64,1)', index * 80));
+};
+get('change-folder').onclick = () => {
+  const path = get('sample-path');
+  const entering = !path.textContent.endsWith('공연');
+  path.textContent = entering ? '공유 폴더 / 영상 / 공연' : '공유 폴더 / 영상';
+  const files = get('sample-files');
+  files.replaceChildren(...(entering ? ['공연 01.mkv', '공연 02.mkv'] : ['▱ 공연', '▱ 영화']).map(name =>
+    Object.assign(document.createElement('span'), { textContent: name })));
+  play(files, [{ opacity: 0, transform: 'scale(.985)' }, { opacity: 1, transform: 'none' }], 300);
+};
+get('toggle-music').onclick = event => {
+  const drawer = get('music-demo');
+  const open = drawer.parentElement.classList.toggle('open');
+  drawer.inert = !open;
+  event.currentTarget.setAttribute('aria-expanded', open);
+  event.currentTarget.textContent = open ? '플레이어 접기' : '플레이어 열기';
+};
+let noticeTimers = [];
+get('replay-update').onclick = () => {
+  noticeTimers.forEach(clearTimeout);
+  noticeTimers = [];
+  const notice = get('sample-notice');
+  const percent = value => {
+    get('sample-progress').style.width = value + '%';
+    get('sample-percent').textContent = value + '%';
+  };
+  const later = (fn, ms) => noticeTimers.push(setTimeout(fn, ms));
+  if (reducedMotion.matches) {
+    notice.classList.add('visible', 'expanded');
+    percent(100);
+    get('notice-state').textContent = '업데이트 다운로드 완료 예시';
+    return;
+  }
+  notice.classList.remove('visible', 'expanded');
+  percent(0);
+  get('notice-state').textContent = '업데이트 다운로드 예시';
+  later(() => notice.classList.add('visible'), 400);
+  later(() => notice.classList.add('expanded'), 1000);
+  later(() => percent(32), 1250);
+  later(() => percent(71), 1650);
+  later(() => { percent(100); get('notice-state').textContent = '업데이트 다운로드 완료 예시'; }, 2050);
+};
+</script></body></html>

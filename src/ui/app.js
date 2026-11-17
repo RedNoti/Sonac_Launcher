@@ -6,7 +6,7 @@ const elements = (id) => $(id).elements;
 const serverTile = ['server-update', '서버 업데이터', 'sync'];
 const groups = [
   { id: 'synology', title: 'SYNOLOGY', tiles: [['dsm', '파일 스테이션']] },
-  { id: 'files', title: '파일 관리', tiles: [['downloads', '다운로드'], ['sync', '백업 · 동기화']] },
+  { id: 'media', title: '미디어', tiles: [['video', '영상 플레이어'], ['audio', '음악 플레이어']] },
   { id: 'git', title: 'GIT', tiles: [['github', 'GitHub'], ['terminal', '터미널']] },
   { id: 'services', title: '서비스', tiles: [['ai-assistant', 'AI', 'sparkles']] }
 ];
@@ -18,6 +18,16 @@ let browserPath = '/';
 let browserMode = null;
 let browserTrigger;
 let pickerDialog;
+let mediaPicker;
+let choosingAiAttachments = false;
+let musicOpen = false;
+let videoOpen = false;
+let subtitleUrl;
+let subtitleRequest;
+const players = {
+  audio: { entries: [], name: '음악' },
+  video: { entries: [], subtitles: [], name: '영상' }
+};
 let settingsOpen = false;
 let settingsTrigger;
 let settingsSection = 'account';
@@ -120,6 +130,8 @@ let usageConnection;
 let aiChats = [];
 let activeAiChat;
 let aiRequest;
+let aiBackPage;
+let aiLoginPending = false;
 let aiStatusTimer;
 let aiHistoryLoad;
 let aiTitleTimer;
@@ -134,6 +146,7 @@ function showOtp(visible) {
 }
 
 function selectNas(profile, { mode = profile ? 'login' : 'register', focus = false } = {}) {
+  const changed = servicePage === 'server' || loginMode !== mode || selectedNas?.id !== profile?.id;
   if (servicePage === 'server') servicePage = undefined;
   loginMode = mode;
   selectedNas = profile;
@@ -156,7 +169,10 @@ function selectNas(profile, { mode = profile ? 'login' : 'register', focus = fal
   savedLoginHint();
   drawLoginButton();
   drawConnectionForm();
-  if (focus) (configuring ? form.name : form.password).focus();
+  if (focus) {
+    if (changed) animateSigninPanel();
+    (configuring ? form.name : form.password).focus();
+  }
 }
 
 function drawLoginButton() {
@@ -172,6 +188,7 @@ function drawConnectionForm() {
   const server = setupAccount ? usageConnection === 'server' : servicePage === 'server';
   const serverOnly = !setupAccount && state.usageMode === 'server';
   const showStatus = serverOnly && !server;
+  $('signin').dataset.nasConfiguring = String(!server && !serverOnly && loginMode !== 'login');
   $('connection-card').hidden = showStatus;
   $('signin-service-status').hidden = !showStatus;
   if (showStatus) drawSigninServiceStatus();
@@ -183,8 +200,17 @@ function drawConnectionForm() {
   $('server-login-back').hidden = !!setupAccount;
   $('login-title').textContent = server ? '서버 업데이터 로그인' : loginMode === 'edit' ? 'NAS 연결 수정' :
     selectedNas ? selectedNas.name || new URL(selectedNas.url).host : 'Synology NAS 등록';
-  const intro = !server && loginMode === 'register' ? '연결 이름과 DSM 주소를 등록하세요.' : '';
-  notice('signin-intro', intro);
+}
+
+let signinPanelMotion;
+function animateSigninPanel() {
+  if ($('signin').hidden || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const panel = $('connection-card').hidden ? $('signin-service-status') : $('connection-card');
+  signinPanelMotion?.cancel();
+  signinPanelMotion = panel.animate([
+    { opacity: 0, transform: 'translateY(7px)' },
+    { opacity: 1, transform: 'translateY(0)' }
+  ], { duration: 220, easing: 'cubic-bezier(.22, 1, .36, 1)' });
 }
 
 function drawSigninServiceStatus() {
@@ -256,8 +282,14 @@ function drawSigninLoading() {
 function showPage() {
   const choosing = !state.usageMode || editingUsage;
   const showServer = !!state.serverUpdaterAccount && servicePage === 'server';
-  const showAi = state.connected && servicePage === 'ai';
   const showSettings = settingsOpen && !choosing && !browserMode;
+  const aiOpen = servicePage === 'ai' && (state.connected || state.serverUpdaterAccount);
+  const showAi = aiOpen && !!state.aiEmail;
+  const showAiLogin = aiOpen && !state.aiEmail;
+  const aiBusy = aiLoginPending || state.serverRestoring || state.applyingUpdate;
+  $('ai-login').hidden = choosing || showSettings || !showAiLogin;
+  $('ai-login-form').inert = aiBusy;
+  $('ai-login-submit').textContent = aiBusy ? '로그인 중…' : '로그인';
   const setup = $('usage-setup');
   if (!choosing) setup.hidden = true;
   else if (setup.hidden) {
@@ -267,22 +299,26 @@ function showPage() {
   }
   const signin = $('signin');
   signin.dataset.serverOnly = String(state.usageMode === 'server');
-  signin.hidden = choosing || showSettings || !!(state.connected || showServer || showAi);
-  $('nas-selection-title').hidden = state.usageMode === 'server';
+  signin.hidden = choosing || showSettings || !!(state.connected || showServer || aiOpen);
+  $('nas-selection-title').textContent = state.usageMode === 'server' ? '서비스 선택' : '저장소 선택';
   $('nas-profiles').hidden = choosing && usageStep === 2 ? usageConnection === 'server' : state.usageMode === 'server';
   $('signin-services').hidden = state.usageMode === 'nas';
   $('server-home').hidden = choosing || showSettings || !showServer;
+  if ($('server-home').hidden && logProject) closeServerLogs();
   $('settings-page').hidden = !showSettings;
   if (showSettings) drawSettings();
-  $('ai-home').hidden = choosing || !showAi;
+  $('ai-home').hidden = choosing || showSettings || !showAi;
   if ($('ai-home').hidden) $('ai-usage').open = false;
   drawSigninLoading();
   drawConnectionForm();
   $('signin-version').hidden = !state.versionLabel || ($('signin').hidden && api.browserPreview !== true);
   const home = $('home');
-  const hideHome = choosing || showSettings || !state.connected || !!showServer || !!showAi || !!browserMode || githubOpen || state.terminalOpen;
+  const showVideo = videoOpen && state.connected && !choosing && !showSettings && !browserMode && !state.terminalOpen;
+  $('video-page').hidden = !showVideo;
+  const hideHome = showVideo || choosing || showSettings || !state.connected || !!showServer || !!aiOpen || !!browserMode || githubOpen || state.terminalOpen;
   if (home.hidden && !hideHome) home.style.setProperty('--tile-page-delay', pageTransition ? '260ms' : '0ms');
   home.hidden = hideHome;
+  drawMusicPanel();
   $('github-page').hidden = !state.connected || !!browserMode || !githubOpen;
   $('browser').hidden = !state.connected || !browserMode;
 }
@@ -372,7 +408,7 @@ async function advanceUsageAccount(next) {
 }
 
 const deploymentLabels = {
-  new: '배포 전', downloading: '다운로드 중', extracting: '압축 해제 중', starting: '시작 중',
+  new: '설치 전', downloading: '다운로드 중', extracting: '압축 해제 중', starting: '시작 중',
   running: '실행 중', stopping: '정지 중', stopped: '정지됨', failed: '실행 실패'
 };
 let deployProject;
@@ -380,9 +416,9 @@ let logProject;
 let logTimer;
 
 function setServerMonitoringView(open) {
-  $('server-monitor-toggle').setAttribute('aria-pressed', String(open));
-  $('server-monitoring').hidden = !open;
-  $('server-files').hidden = open;
+  $('server-monitor-toggle').setAttribute('aria-expanded', String(open));
+  $('server-monitoring').classList.toggle('show-monitor-controls', open);
+  $('server-monitor-controls').hidden = !open;
 }
 
 async function showDeployment(file) {
@@ -398,26 +434,45 @@ async function showDeployment(file) {
   if (!$('server-deploy-dialog').open) $('server-deploy-dialog').showModal();
 }
 
-async function refreshServerLogs(file) {
-  if (file !== logProject || !$('server-log-dialog').open) return;
+function closeServerLogs() {
+  logProject = undefined;
+  clearTimeout(logTimer);
+  const panel = $('server-log-panel');
+  panel.hidden = true;
+  $('server-home').append(panel);
+  for (const control of $('server-file-list').querySelectorAll('[aria-controls="server-log-panel"]')) {
+    control.setAttribute('aria-expanded', 'false');
+  }
+}
+
+async function refreshServerLogs(project) {
+  if (logProject !== project) return;
   const output = $('server-log-output');
-  const log = await api.serverLogs(file.id).catch(error => error.message);
-  if (file !== logProject || !$('server-log-dialog').open) return;
+  const log = await api.serverLogs(project.id).catch(error => error.message);
+  if (logProject !== project) return;
   const text = log || '아직 기록된 로그가 없습니다.';
   if (output.textContent !== text) {
     const follow = output.scrollHeight - output.scrollTop - output.clientHeight < 35;
     output.textContent = text;
     if (follow) output.scrollTop = output.scrollHeight;
   }
-  logTimer = setTimeout(() => void refreshServerLogs(file), 750);
+  logTimer = setTimeout(() => void refreshServerLogs(project), 750);
 }
 
-function showServerLogs(file) {
-  logProject = file;
-  $('server-log-title').textContent = file.name + ' 로그';
-  $('server-log-output').textContent = '';
-  $('server-log-dialog').showModal();
-  void refreshServerLogs(file);
+function serverOverview(account) {
+  const { files, monitoring } = account;
+  const running = files.filter(file => file.phase === 'running').length;
+  const failures = files.filter(file => file.phase === 'failed').length;
+  const latest = files.filter(file => file.updatedAt).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const targets = monitoring?.targets ?? [];
+  const normal = targets.filter(target => target.latest?.status === 'healthy').length;
+  const checked = Math.max(0, ...targets.map(target => target.latest?.at ?? 0));
+  $('server-overview-running').textContent = running + ' / ' + files.length + ' 실행 중';
+  $('server-overview-running-note').textContent = failures ? '실행 실패 ' + failures + '개' : files.length ? '등록된 프로젝트 기준' : '등록된 프로젝트 없음';
+  $('server-overview-healthy').textContent = normal + ' / ' + targets.length + ' 정상';
+  $('server-overview-healthy-note').textContent = checked ? shortDate.format(checked) : targets.length ? '상태 확인 대기' : '등록된 웹페이지 없음';
+  $('server-overview-release').textContent = latest?.installed ?? '—';
+  $('server-overview-release-note').textContent = latest ? latest.name + ' · ' + shortDate.format(latest.updatedAt) : '기록된 업데이트 없음';
 }
 
 function serverStatus(label, tone) {
@@ -425,6 +480,29 @@ function serverStatus(label, tone) {
   status.dataset.tone = tone;
   status.append(make('span', '', 'dot'), make('span', label));
   return status;
+}
+
+function drawServerProjectTiles(files) {
+  const tiles = $('server-home-tiles');
+  const focused = tiles.contains(document.activeElement) ? document.activeElement.dataset.project : undefined;
+  for (const shortcut of tiles.querySelectorAll('.server-project-shortcut')) shortcut.remove();
+  const shortcuts = (files ?? []).map(file => {
+    const shortcut = tile(file.name, 'dsm', () => {
+      const card = [...$('server-file-list').children].find(item => item.dataset.project === file.id);
+      card?.focus();
+    });
+    const phase = file.phase ?? 'new';
+    const label = deploymentLabels[phase];
+    shortcut.dataset.project = file.id;
+    shortcut.append(make('span', label, 'server-tile-state'));
+    shortcut.dataset.phase = phase;
+    shortcut.title = file.name + ' · ' + label;
+    return shortcut;
+  });
+  if (files && !files.length) shortcuts.push(tile('프로젝트 연결', 'dsm', openServerProjectForm, 'add'));
+  for (const shortcut of shortcuts) shortcut.classList.add('server-project-shortcut');
+  tiles.prepend(...shortcuts);
+  if (focused) shortcuts.find(item => item.dataset.project === focused)?.focus({ preventScroll: true });
 }
 
 function drawServerHome(previous) {
@@ -441,22 +519,36 @@ function drawServerHome(previous) {
   $('server-github-disconnect').hidden = !githubLogin;
   if (!account) {
     if (previous) {
+      closeServerLogs();
       setServerMonitoringView(false);
+      setServerProjectForm(false);
       $('server-file-form').reset();
       $('server-file-list').replaceChildren();
+      drawServerProjectTiles(null);
       $('server-home-account').textContent = '';
       notice('server-home-error');
     }
     return;
   }
   $('server-home-account').textContent = account.email;
+  serverOverview(account);
   if (JSON.stringify(account.files) === JSON.stringify(previous?.files)) return;
+  drawServerProjectTiles(account.files);
   const report = error => notice('server-home-error', error.message, true);
-  $('server-file-list').replaceChildren(...account.files.map(file => {
+  const logPanel = $('server-log-panel');
+  if (logProject && !account.files.some(file => file.id === logProject.id)) closeServerLogs();
+  const activeElement = document.activeElement;
+  const focusedAction = activeElement.closest('.server-project-card')?.dataset.project;
+  const focusedLabel = activeElement.getAttribute('aria-label');
+  const cards = account.files.map(file => {
     const card = make('article', '', 'server-project-card');
+    card.dataset.project = file.id;
+    card.tabIndex = -1;
     const row = make('div', '', 'work-row');
     const identity = make('div', '', 'server-project-identity');
-    identity.append(icon('dsm', '#a9c6f8'), make('h3', file.name));
+    const badge = make('span', '', 'server-project-icon');
+    badge.append(icon('dsm', '#a9c6f8'));
+    identity.append(badge, make('h3', file.name));
     const phase = file.phase ?? 'new';
     const pending = ['downloading', 'extracting', 'starting', 'stopping'].includes(phase);
     const tone = phase === 'running' ? 'good' : phase === 'failed' ? 'bad' : pending ? 'warn' : 'idle';
@@ -464,35 +556,86 @@ function drawServerHome(previous) {
     row.append(identity);
     if (file.installed) row.append(make('span', file.installed, 'work-meta server-release-tag'));
     const actions = make('div', '', 'work-actions');
-    const command = (label, action, disabled = false, style) => {
-      const control = make('button', label, style);
+    const command = (label, action, { disabled = false, style, glyph } = {}) => {
+      const control = make('button', glyph ? '' : label, style);
       control.type = 'button';
       control.disabled = disabled;
+      if (glyph) {
+        control.classList.add('server-icon-button');
+        control.title = label;
+        control.setAttribute('aria-label', label);
+        control.append(icon(glyph, '#dbe7ff'));
+      }
       control.addEventListener('click', busy(control, async () => {
         notice('server-home-error');
         await action();
       }, report));
       return control;
     };
-    const deploy = command(file.installed ? '다시 배포' : '배포', () => showDeployment(file), pending, 'primary');
-    const toggle = phase === 'running' ? command('정지', () => api.serverStop(file.id))
-      : command('실행', () => api.serverRun(file.id), pending);
-    actions.append(deploy);
-    if (file.installed || phase === 'running') actions.append(toggle);
-    actions.append(
-      button('로그', () => showServerLogs(file)),
-      command('배포 폴더', () => api.serverDeploymentFolder(file.id), !file.installed || pending),
+    const logs = command('로그', () => {
+      if (logProject?.id === file.id) {
+        closeServerLogs();
+        return;
+      }
+      closeServerLogs();
+      logProject = file;
+      $('server-log-output').textContent = '';
+      logPanel.hidden = false;
+      card.append(logPanel);
+      logs.setAttribute('aria-expanded', 'true');
+      void refreshServerLogs(file);
+    }, { glyph: 'terminal' });
+    logs.setAttribute('aria-controls', 'server-log-panel');
+    logs.setAttribute('aria-expanded', String(logProject?.id === file.id));
+    const more = make('details', '', 'server-project-more');
+    const summary = make('summary', '', 'server-icon-button');
+    summary.setAttribute('aria-label', '더보기');
+    summary.title = '더보기';
+    summary.append(icon('more', '#dbe7ff'));
+    const options = make('div', '', 'server-project-menu');
+    options.append(
+      command('배포 폴더', () => api.serverDeploymentFolder(file.id), { disabled: !file.installed || pending }),
       command('설정 폴더', () => api.serverDataFolder(file.id)),
-      button('GitHub에서 열기', () => void api.serverFileOpen(file.id).catch(report)),
-      command('연결 해제', () => api.serverFileRemove(file.id), pending || phase === 'running')
+      command('연결 해제', () => api.serverFileRemove(file.id), { disabled: pending || phase === 'running', style: 'danger' })
     );
-    card.append(row, make('p', file.url, 'work-meta'), actions);
+    options.addEventListener('click', () => { more.open = false; });
+    more.append(summary, options);
+    actions.append(
+      command('업데이트', () => showDeployment(file), { disabled: pending, style: 'primary' }),
+      phase === 'running' ? command('정지', () => api.serverStop(file.id), { glyph: 'stop' })
+        : command('실행', () => api.serverRun(file.id), { glyph: 'play', disabled: pending || !file.installed }),
+      logs,
+      command('GitHub에서 열기', () => api.serverFileOpen(file.id), { glyph: 'github' }),
+      more
+    );
+    card.append(row, make('p', file.url, 'work-meta server-project-url'));
+    if (['downloading', 'extracting', 'starting'].includes(phase) && file.updating) {
+      const steps = make('ol', '', 'server-update-steps');
+      steps.setAttribute('aria-label', '업데이트 진행 단계');
+      const phases = ['downloading', 'extracting', 'starting'];
+      ['릴리스 다운로드', '압축 해제', '서버 실행'].forEach((label, index) => {
+        const step = make('li', label);
+        if (index < phases.indexOf(phase)) step.dataset.done = 'true';
+        if (phases[index] === phase) step.setAttribute('aria-current', 'step');
+        steps.append(step);
+      });
+      card.append(steps);
+    }
+    card.append(actions);
     return card;
-  }));
+  });
+  $('server-file-list').replaceChildren(...cards);
+  if (logProject) cards.find(card => card.dataset.project === logProject.id)?.append(logPanel);
+  if (focusedAction && focusedLabel) cards.find(card => card.dataset.project === focusedAction)
+    ?.querySelectorAll('[aria-label]').forEach(control => {
+      if (control.getAttribute('aria-label') === focusedLabel && !control.disabled) control.focus({ preventScroll: true });
+    });
 }
 
 function drawServerMonitoring(monitoring, previous) {
   $('server-monitor-toggle').hidden = !monitoring;
+  $('server-monitor-check').disabled = !!monitoring?.checking || !monitoring?.targets.length;
+  $('server-monitor-check').textContent = monitoring?.checking ? '확인 중…' : '전체 확인';
   const form = elements('server-monitor-settings');
   if (!monitoring) {
     if (previous) {
@@ -511,29 +654,26 @@ function drawServerMonitoring(monitoring, previous) {
     form.webhook.placeholder = monitoring.hasWebhook ? '저장됨 · 바꾸려면 새 주소 입력' : '선택 사항';
     $('server-monitor-remove-webhook').hidden = !monitoring.hasWebhook;
   }
-  if (JSON.stringify(monitoring.targets) !== JSON.stringify(previous?.targets)) {
+  if (monitoring.checking !== previous?.checking || JSON.stringify(monitoring.targets) !== JSON.stringify(previous?.targets)) {
     const labels = { healthy: '정상', degraded: '경고', down: '장애' };
     $('server-monitor-targets').replaceChildren(...monitoring.targets.map(target => {
       const row = make('article', '', 'server-monitor-card');
-      const header = make('div', '', 'work-row');
-      const name = make('div', '', 'server-project-identity');
-      name.append(icon('dsm', '#a9c6f8'), make('h3', target.name));
-      const action = make('button', '', 'server-icon-button');
-      action.type = 'button';
-      action.setAttribute('aria-label', target.name + ' 제거');
-      action.title = '제거';
-      action.append(icon('trash', '#a9c6f8'));
-      action.addEventListener('click', busy(action, async () => apply(await api.serverMonitorTarget(target.id, true)),
-        error => notice('server-monitor-error', error.message, true)));
-      header.append(name, action);
-      const { status, latencyMs, at } = target.latest ?? {};
-      const description = status ? [latencyMs === undefined ? '' : latencyMs + 'ms', shortDate.format(at)].filter(Boolean).join(' · ') : '';
-      const tone = { healthy: 'good', degraded: 'warn', down: 'bad' };
-      row.append(header, make('p', target.url, 'work-meta'),
-        serverStatus(labels[status] ?? '확인 대기', tone[status] ?? 'idle'));
-      if (description) row.append(make('p', description, 'work-meta'));
+      const { status, latencyMs } = target.latest ?? {};
+      row.dataset.tone = { healthy: 'good', degraded: 'warn', down: 'bad' }[status] ?? 'idle';
+      const name = make('div', '', 'server-site-name');
+      name.append(make('h3', target.name), make('p', target.url, 'work-meta'));
+      const check = button('확인', () => void checkServerSites(target.id));
+      check.disabled = !!monitoring.checking;
+      const remove = button('', () => void busy(remove, async () => apply(await api.serverMonitorTarget(target.id, true)),
+        error => notice('server-monitor-error', error.message, true))(), 'server-icon-button server-site-remove');
+      remove.setAttribute('aria-label', target.name + ' 제거');
+      remove.title = '제거';
+      remove.append(icon('trash', '#a9c6f8'));
+      const result = [labels[status] ?? '확인 대기', latencyMs === undefined ? '' : latencyMs + 'ms'].filter(Boolean).join(' · ');
+      row.append(make('span', '', 'server-site-dot'), name, make('span', result, 'server-site-result'), check, remove);
       return row;
     }));
+    if (!monitoring.targets.length) $('server-monitor-targets').append(make('p', '등록된 웹페이지가 없습니다.', 'work-meta'));
   }
   if (monitoring.error !== previous?.error) notice('server-monitor-error', monitoring.error, true);
   const report = monitoring.latestReport;
@@ -572,6 +712,7 @@ function drawAiUsage() {
 
 const aiPhaseLabels = {
   preparing: '이전 대화와 요청을 준비하는 중…',
+  queued: '전송 대기 중 · 요청이 가능해지면 자동으로 보냅니다.',
   waiting: 'EXAONE에 요청을 보내고 응답을 기다리는 중…',
   connected: 'EXAONE에 연결됨 · 추론 또는 답변을 기다리는 중…',
   reasoning: 'EXAONE이 요청을 분석하고 답변을 구상하는 중…',
@@ -585,16 +726,27 @@ function drawAiRequestStatus() {
   const pending = !!aiRequest;
   const visibleRequest = aiRequest && aiRequest.chat === activeAiChat ? aiRequest : undefined;
   const wait = (state?.aiUsage?.rateLimit?.retryAt ?? 0) - Date.now();
-  $('ai-send').disabled = wait > 0 || !!aiHistoryLoad || !activeAiChat || !elements('ai-form').message.value.trim();
+  const attachments = activeAiChat?.draftFiles?.length ?? 0;
+  $('ai-send').disabled = pending || choosingAiAttachments || !!aiHistoryLoad || !activeAiChat ||
+    (!attachments && !elements('ai-form').message.value.trim());
+  $('ai-attach').disabled = pending || choosingAiAttachments || !!aiHistoryLoad || !activeAiChat || attachments >= 3;
+  $('ai-send').title = wait > 0 ? '전송 대기에 추가' : '보내기';
+  $('ai-send').setAttribute('aria-label', $('ai-send').title);
+  $('ai-stop').title = aiRequest?.phase === 'queued' ? '전송 대기 취소' : '응답 중지';
+  $('ai-stop').setAttribute('aria-label', $('ai-stop').title);
   $('ai-send').hidden = pending;
   $('ai-stop').hidden = !pending;
   $('ai-stop').disabled = aiRequest?.phase === 'stopping' || aiRequest?.phase === 'saving';
   $('ai-effort').disabled = pending;
   const seconds = Math.ceil(wait / 1000);
   const duration = seconds >= 60 ? Math.ceil(seconds / 60) + '분' : seconds + '초';
-  const message = visibleRequest ? aiPhaseLabels[visibleRequest.phase]
-    : pending ? '다른 대화에서 답변을 받는 중…'
-      : wait > 0 ? '약 ' + duration + ' 후 다시 보낼 수 있어요.' : '';
+  let message = wait > 0 ? '요청 한도 대기 중 · 메시지 한 건을 예약할 수 있어요.' : '';
+  if (visibleRequest) {
+    message = visibleRequest.phase === 'queued' && wait > 0
+      ? '전송 대기 중 · 약 ' + duration + ' 후 자동으로 보냅니다.' : aiPhaseLabels[visibleRequest.phase];
+  } else if (pending) {
+    message = aiRequest.phase === 'queued' ? '다른 대화의 메시지가 전송 대기 중…' : '다른 대화에서 답변을 받는 중…';
+  }
   const feed = $('ai-messages');
   const follow = aiFeedAtBottom(feed);
   const progress = $('ai-progress');
@@ -631,12 +783,36 @@ function aiFeedAtBottom(feed) {
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 4;
 }
 
+function drawAiAttachments() {
+  const container = $('ai-attachments');
+  const files = activeAiChat?.draftFiles ?? [];
+  container.replaceChildren(...files.map(file => {
+    const item = make('span', '', 'ai-attachment-chip');
+    const remove = button('×', () => {
+      activeAiChat.draftFiles = activeAiChat.draftFiles.filter(other => other !== file);
+      drawAiAttachments();
+      drawAiRequestStatus();
+      $('ai-attach').focus();
+    });
+    remove.setAttribute('aria-label', file.name + ' 첨부 제거');
+    item.title = file.truncated ? file.name + ' · 처음 12,000자만 첨부됨' : file.name;
+    item.append(make('span', file.name + (file.truncated ? ' · 일부' : '')), remove);
+    return item;
+  }));
+  container.hidden = !files.length;
+}
+
 function drawAiChat(resetScroll = false) {
   drawAiChatList();
+  drawAiAttachments();
   const feed = $('ai-messages');
   const previousScroll = feed.scrollTop;
   const follow = resetScroll || aiFeedAtBottom(feed);
-  feed.replaceChildren(...(activeAiChat?.messages ?? []).map(({ role, content }) => make('p', content, 'ai-message ' + role)));
+  feed.replaceChildren(...(activeAiChat?.messages ?? []).map(({ role, content, attachments }) => {
+    const message = make('p', content, 'ai-message ' + role);
+    if (attachments?.length) message.prepend(make('span', attachments.map(file => '첨부 · ' + file.name).join('\n'), 'ai-message-files'));
+    return message;
+  }));
   if (aiRequest && aiRequest.chat === activeAiChat) {
     feed.append(make('p', aiRequest.answer, 'ai-message assistant ai-streaming'));
   }
@@ -824,6 +1000,8 @@ function drawUpdateNowBar(phase, tag, percent) {
   updateReadyFace.inert = downloading;
 }
 
+let updateButtonError = '';
+
 function drawUpdate() {
   const update = state.update;
   const downloading = update?.phase === 'downloading';
@@ -838,12 +1016,9 @@ function drawUpdate() {
     const home = id === 'update-now';
     if (home) button.hidden = !tag;
     button.disabled = updating || downloading || update?.phase === 'checking' || state.connecting;
+    if (id === 'account-update-check') continue;
     button.title = tag ? label : '앱 업데이트 확인';
     button.setAttribute('aria-label', button.title);
-    if (id === 'account-update-check') {
-      button.textContent = tag ? label : update?.phase === 'checking' ? '확인 중…' : '업데이트 확인';
-      continue;
-    }
     const tint = tag ? '#4ade80' : '#cbd8ef';
     const glyph = ready ? 'sync' : 'downloads';
     if (button.dataset.tint !== tint || button.dataset.glyph !== glyph) {
@@ -870,8 +1045,21 @@ function drawUpdate() {
   const current = update?.phase === 'current';
   const error = ['missing', 'error'].includes(update?.phase);
   const percent = downloading ? update.percent ?? 0 : undefined;
-  const accountMessage = current ? '' : downloading ? message + ' ' + percent + '%' : message;
-  if ($('update-status').textContent !== accountMessage) notice('update-status', accountMessage, error);
+  const account = $('account-update-check');
+  const accountLabel = {
+    checking: '확인 중…',
+    current: '최신 버전 사용 중',
+    downloading: `다운로드 중 · ${percent}%`,
+    ready: applying ? '업데이트 적용 중…' : '다시 시작하기',
+    missing: '설치 파일 없음',
+    error: '업데이트 확인 실패',
+    unsupported: '자동 업데이트 미지원'
+  }[update?.phase];
+  const buttonText = updateButtonError ? '업데이트 실패 · 다시 시도' : accountLabel || (tag ? label : '업데이트 확인');
+  if (account.textContent !== buttonText) account.textContent = buttonText;
+  account.title = updateButtonError || message || buttonText;
+  account.setAttribute('aria-label', buttonText);
+  account.classList.toggle('danger', !!updateButtonError || error);
   const signinNotice = !$('signin').hidden && !state.connecting && update?.phase !== 'checking' &&
     (!current || signinCurrentTimer) && !ready;
   const showReady = ready && dismissedUpdate !== tag;
@@ -910,14 +1098,27 @@ function apply(next, animate = true) {
     signinCurrentTimer = undefined;
   }
   if (previous?.connected && !state.connected) {
+    for (const kind of Object.keys(players)) {
+      stopMedia(kind);
+      players[kind].folder = players[kind].loading = undefined;
+      players[kind].entries = [];
+      $(kind + '-list').replaceChildren();
+      drawMediaList(kind);
+    }
+    players.video.subtitles = [];
+    musicOpen = videoOpen = false;
+    mediaPicker = undefined;
     clearTimeout(aiTitleTimer);
-    if (servicePage === 'ai') servicePage = undefined;
+    if (servicePage === 'ai' && !state.serverUpdaterAccount) servicePage = undefined;
+    notice('login-error');
+  }
+  if (previous && (previous.connected !== state.connected || previous.aiEmail !== state.aiEmail)) {
+    clearTimeout(aiTitleTimer);
     aiChats = [];
     activeAiChat = aiRequest = aiHistoryLoad = undefined;
     $('ai-new-chat').disabled = false;
     $('ai-form').reset();
     drawAiChat();
-    notice('login-error');
   }
   if (!state.connected && browserMode) resetBrowser();
   if (!previous || previous.connected !== state.connected) {
@@ -934,10 +1135,18 @@ function apply(next, animate = true) {
   if (!state.serverUpdaterAccount && state.serverAuthError && state.serverAuthError !== previous?.serverAuthError) {
     notice('server-login-error', state.serverAuthError);
   }
+  if (servicePage === 'ai' && previous &&
+      (previous.aiEmail !== state.aiEmail || previous.connected !== state.connected) && !$('ai-home').hidden) {
+    void restoreAiChats();
+  }
+  if (servicePage === 'ai' && state.serverAuthError && state.serverAuthError !== previous?.serverAuthError) {
+    notice('ai-login-error', state.serverAuthError);
+  }
   drawServerHome(previous?.serverUpdaterAccount);
   drawAiUsage();
-  if (previous?.terminalOpen && !state.terminalOpen && !$('home').hidden) {
-    document.querySelector('.tile:has(.terminal)')?.focus();
+  if (previous?.terminalOpen && !state.terminalOpen) {
+    if (!$('server-home').hidden) $('server-terminal').focus();
+    else if (!$('home').hidden) document.querySelector('.tile:has(.terminal)')?.focus();
   }
   workspaceChanged(previous);
   drawUpdate();
@@ -979,22 +1188,38 @@ async function activate(id) {
   if (pageTransition) return;
   try {
     if (id === 'dsm') return openBrowser('remote');
-    if (id === 'server-update') return navigate(() => {
+    if (Object.hasOwn(players, id)) return openMediaPlayer(id);
+    if (id === 'server-update') {
+      const changed = servicePage !== 'server';
       servicePage = 'server';
       notice('server-login-error');
       showPage();
-      if (state.serverRemembered && !state.serverUpdaterAccount) {
-        void api.serverUpdaterRestore().then(apply).catch(error => notice('server-login-error', error.message));
+      if (state.serverUpdaterAccount) {
+        $('server-home-title').focus();
+      } else {
+        if (changed) animateSigninPanel();
+        if (state.serverRemembered) {
+          void api.serverUpdaterRestore().then(apply).catch(error => notice('server-login-error', error.message));
+        }
+        elements('server-login-form').email.focus();
       }
-      if (state.serverUpdaterAccount) $('server-home-title').focus();
-      else elements('server-login-form').email.focus();
-    });
-    if (id === 'ai-assistant' && state.connected) return navigate(() => {
+      return;
+    }
+    if (id === 'ai-assistant' && (state.connected || state.serverUpdaterAccount)) return navigate(() => {
+      aiBackPage = servicePage;
       servicePage = 'ai';
+      notice('ai-login-error');
       showPage();
-      if (!activeAiChat && !aiHistoryLoad) void restoreAiChats();
-      else scheduleAiTitle();
-      $('ai-title').focus();
+      if (state.aiEmail) {
+        if (!activeAiChat && !aiHistoryLoad) void restoreAiChats();
+        else scheduleAiTitle();
+        $('ai-title').focus();
+      } else {
+        $('ai-login-title').focus();
+        if (state.serverRemembered) {
+          void api.serverUpdaterRestore(true).then(apply).catch(error => notice('ai-login-error', error.message));
+        }
+      }
     });
     if (id === 'downloads') return openBrowser('local');
     if (id === 'sync') return openSettings('sync');
@@ -1026,22 +1251,28 @@ function drawTiles() {
 }
 
 function drawSettings() {
-  const { profile, settings, connected, github, serverUpdaterAccount } = state;
+  const { profile, settings, connected, github } = state;
   $('account-device').textContent = state.device || '—';
   $('account-server').textContent = connected ? profile.url : '연결 안 됨';
   $('account-user').textContent = connected ? profile.user : '';
   $('account-github').textContent = github ? '@' + github.login : '연결 안 됨';
-  $('account-server-updater').textContent = serverUpdaterAccount?.email || '로그인 안 됨';
+  $('account-launcher-label').textContent = state.usageMode === 'nas' ? 'AI 채팅' : '서버 업데이터';
+  $('account-server-updater').textContent = state.aiEmail || '로그인 안 됨';
   $('settings-version').textContent = state.versionLabel || '';
   $('settings-tray').checked = !!state.trayVisible;
   $('settings-launch').checked = !!state.launchAtLogin;
   $('account-writes').checked = !!settings?.remoteWrites;
   $('settings-auto-sync').checked = !!settings?.automatic;
-  for (const id of ['settings-sync-nav', 'nas-account-row', 'github-account-row', 'nas-write-setting',
+  for (const id of ['settings-media-nav', 'settings-sync-nav', 'nas-account-row', 'github-account-row', 'nas-write-setting',
     'account-github-open', 'account-switch', 'logout-button']) $(id).hidden = !connected;
-  $('settings-server-logout').hidden = !serverUpdaterAccount;
+  $('settings-server-logout').hidden = !state.aiEmail;
+  $('settings-server-logout').textContent = state.usageMode === 'nas' ? 'AI 로그아웃' : '서버 업데이터 로그아웃';
   $('usage-edit').hidden = connected;
-  if (!connected && settingsSection === 'sync') settingsSection = 'account';
+  $('uninstall-mac').hidden = api.platform !== 'darwin' || !state.packaged;
+  for (const kind of Object.keys(players)) {
+    $('settings-' + kind + '-folder').textContent = settings?.mediaFolders?.[kind] || '지정되지 않음';
+  }
+  if (!connected && ['sync', 'media'].includes(settingsSection)) settingsSection = 'account';
   for (const control of settingsSections) {
     const selected = control.dataset.settingsSection === settingsSection;
     if (selected) control.setAttribute('aria-current', 'page');
@@ -1142,6 +1373,11 @@ function updateSelection() {
   $('delete-selection').hidden = browserMode === 'remote' && (!state.settings.remoteWrites ||
     browserPath === '/' && state.profile.provider === 'synology');
   const remote = browserMode === 'remote';
+  const writableSelection = remote && state.settings.remoteWrites && browserPath !== '/';
+  $('rename-selection').hidden = !writableSelection;
+  $('rename-selection').disabled = !single || transferring || loadingFolder;
+  $('extract-selection').hidden = !writableSelection;
+  $('extract-selection').disabled = !single || folder || !/\.zip$/iu.test(files[0]?.name ?? '') || transferring || loadingFolder;
   $('mkdir-button').hidden = !remote;
   $('mkdir-button').disabled = !state.settings.remoteWrites || browserPath === '/' || transferring || loadingFolder;
   for (const id of ['download-selection', 'delete-selection']) $(id).disabled = !files.length || transferring || loadingFolder;
@@ -1412,9 +1648,9 @@ function enterBrowser(mode, path, fromDialog) {
   }
   browserMode = mode;
   const remoteTitle = state.profile.provider === 'synology' ? '파일 스테이션' : '클라우드 파일';
-  $('browser-title').textContent = { local: '다운로드', picker: '동기화 폴더 선택', remote: remoteTitle }[mode];
+  $('browser-title').textContent = { local: '다운로드', picker: mediaPicker ? players[mediaPicker].name + ' 폴더 선택' : '동기화 폴더 선택', remote: remoteTitle }[mode];
   $('browser-label').textContent = mode === 'local' ? '' : new URL(state.profile.url).host;
-  $('browser-home-label').textContent = mode === 'picker' ? '설정으로 돌아가기' : '홈';
+  $('browser-home-label').textContent = mode === 'picker' ? mediaPicker ? '플레이어로 돌아가기' : '설정으로 돌아가기' : '홈';
   $('browser-remote-label').textContent = remoteTitle;
   $('browser-remote').hidden = mode === 'picker';
   $('browser-local').hidden = mode === 'picker';
@@ -1432,6 +1668,7 @@ function resetBrowser() {
   closeFileMenu();
   browseGeneration++;
   browserMode = null;
+  mediaPicker = undefined;
   browserTrigger = null;
   browserFolders = {};
   browserEntries = [];
@@ -1441,27 +1678,30 @@ function resetBrowser() {
 
 function leaveBrowser() {
   const picker = browserMode === 'picker';
+  const pickedMedia = mediaPicker;
   const trigger = browserTrigger;
   resetBrowser();
   showPage();
-  if (picker && pickerDialog) $(pickerDialog).showModal();
+  if (picker && !pickedMedia && pickerDialog) $(pickerDialog).showModal();
   if (trigger?.isConnected) trigger.focus();
 }
 
-async function transfer(action, progress = '파일 전송 중…') {
+async function transfer(action, progress, direction) {
   if (transferring || loadingFolder) return;
   transferring = true;
   browseButtons();
   notice('browser-status', progress);
   try {
-    await action();
-    if ($('browser-status').textContent === progress) notice('browser-status');
+    const result = await action();
+    if (direction && result) finishFileTransfer(direction, result.message, result.failed);
+    if (progress && $('browser-status').textContent === progress) notice('browser-status');
+    return result;
   } catch (error) {
-    if (browserMode) notice('browser-status', error.message, true);
+    if (direction) finishFileTransfer(direction, error.message, true);
+    else if (browserMode) notice('browser-status', error.message, true);
     else toast(error.message);
   } finally {
     transferring = false;
-    $('transfer-indicator').hidden = true;
     if (state.connected) browseButtons();
   }
 }
@@ -1538,7 +1778,7 @@ $('usage-next').addEventListener('click', async () => {
   notice('usage-error');
   try {
     const preparing = usageStep === 1;
-    if (preparing && editingUsage && state.serverUpdaterAccount) {
+    if (preparing && editingUsage && state.aiEmail) {
       apply(await api.serverUpdaterLogout(false), false);
     }
     const next = await api.setUsageMode(mode, preparing);
@@ -1590,11 +1830,645 @@ $('server-login-form').addEventListener('submit', async event => {
     if (!state.serverUpdaterAccount && !$('server-login').hidden) password.focus();
   }
 });
-function returnHome() {
+function drawMusicPanel() {
+  const panel = $('music-panel');
+  const toggle = $('music-toggle');
+  const visible = musicOpen && !$('home').hidden;
+  panel.inert = !visible;
+  panel.classList.toggle('is-open', visible);
+  document.body.classList.toggle('music-player-open', visible);
+  toggle.hidden = !state.connected;
+  toggle.setAttribute('aria-expanded', String(visible));
+  toggle.title = visible ? '음악 플레이어 접기' : '음악 플레이어 열기';
+  toggle.setAttribute('aria-label', toggle.title);
+}
+
+function showMediaPlayer(kind) {
+  if (kind === 'audio') musicOpen = true;
+  else videoOpen = true;
+  showPage();
+  if (kind === 'audio' && !$('home').hidden) $('music-title').focus();
+  if (kind === 'video' && !$('video-page').hidden) $('video-title').focus();
+}
+
+function pickMediaFolder(kind) {
+  if (transferring) return toast('파일 전송이 끝난 뒤 다시 열어 주세요.');
+  const start = players[kind].folder || state.settings.mediaFolders?.[kind] || '/';
   navigate(() => {
-    const glyph = servicePage === 'ai' ? 'ai-assistant' : 'server-update';
+    mediaPicker = kind;
+    pickerDialog = undefined;
+    enterBrowser('picker', start);
+  }, 'enter');
+}
+
+function openMediaPlayer(kind) {
+  const folder = players[kind].folder || state.settings.mediaFolders?.[kind];
+  if (!folder) return pickMediaFolder(kind);
+  showMediaPlayer(kind);
+  if (!players[kind].folder && !players[kind].loading) void loadMediaFolder(kind, folder);
+}
+
+function clearSubtitle() {
+  subtitleRequest = undefined;
+  const playback = $('video-playback');
+  playback.querySelector('track')?.remove();
+  for (const track of playback.textTracks) {
+    if (track.kind === 'subtitles' || track.kind === 'captions') track.mode = 'disabled';
+  }
+  if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
+  subtitleUrl = undefined;
+  $('video-subtitle').value = '';
+  notice('video-subtitle-status');
+}
+
+function stopMedia(kind) {
+  const player = players[kind];
+  if (kind === 'audio') return stopMusic();
+  const id = player.id;
+  player.id = player.selected = undefined;
+  const playback = $(kind + '-playback');
+  playback.pause();
+  if (playback.hasAttribute('src')) {
+    playback.removeAttribute('src');
+    playback.load();
+  }
+  if (kind === 'video') { clearSubtitle(); showVideoLoading(); }
+  if (id) void api.closePreview(id).catch(() => {});
+}
+
+function drawMediaList(kind) {
+  const player = players[kind];
+  const index = player.entries.indexOf(player.selected);
+  $(kind + '-folder').textContent = player.folder || '';
+  if (kind === 'audio') {
+    for (const entry of player.entries) {
+      if (!entry.control) continue;
+      const selected = entry === player.selected;
+      entry.control.setAttribute('aria-pressed', String(selected));
+      if (selected) entry.control.closest('details').open = true;
+    }
+    $('audio-prev').disabled = index < 1;
+    $('audio-next').disabled = index < 0 || index >= player.entries.length - 1;
+    return;
+  }
+  $('video-current').textContent = player.selected?.name || '영상을 선택하세요';
+  for (const entry of player.entries) {
+    if (!entry.control) continue;
+    entry.control.setAttribute('aria-pressed', String(entry === player.selected));
+    if (entry === player.selected) entry.control.closest('details').open = true;
+  }
+  const enabled = player.selected && $('video-playback').hasAttribute('src');
+  $('video-subtitle').disabled = !enabled;
+  $('video-local-subtitle').disabled = !enabled;
+  drawVideoTransport();
+}
+
+function drawVideoLibrary(player) {
+  const folders = new Map();
+  for (const entry of player.entries) {
+    const folder = entry.folder || player.folder;
+    if (!folders.has(folder)) folders.set(folder, []);
+    folders.get(folder).push(entry);
+  }
+  const groups = [];
+  for (const [folder, entries] of folders) {
+    const row = make('li');
+    const group = make('details', '', 'video-folder-group');
+    group.open = groups.length === 0;
+    const display = folder === player.folder ? '기본 폴더' : folder.slice(player.folder === '/' ? 1 : player.folder.length + 1);
+    const summary = make('summary');
+    summary.append(make('span', display, 'video-folder-name'),
+      make('span', String(entries.length), 'video-folder-count'));
+    summary.title = folder;
+    const list = make('ul');
+    for (const entry of entries) {
+      const item = make('li');
+      const control = entry.control = button(entry.name, () => void playMedia('video', entry));
+      control.title = entry.name;
+      item.append(control);
+      list.append(item);
+    }
+    group.append(summary, list);
+    row.append(group);
+    groups.push(row);
+  }
+  $('video-list').replaceChildren(...groups);
+}
+
+async function loadMediaFolder(kind, folder, fromSettings = false) {
+  const player = players[kind];
+  stopMedia(kind);
+  player.entries = [];
+  $(kind + '-list').replaceChildren();
+  drawMediaList(kind);
+  const request = player.loading = Symbol();
+  const statusId = fromSettings ? 'settings-media-status' : kind + '-status';
+  notice(statusId, 'NAS 폴더를 불러오는 중…');
+  try {
+    const { entries, subtitles, truncated, skipped } = await api.mediaFolder(kind, folder);
+    if (player.loading !== request) return;
+    player.folder = folder;
+    const compare = (a, b) => a.localeCompare(b, 'ko', { numeric: true });
+    player.entries = entries.sort((a, b) => compare(a.folder || '', b.folder || '') || compare(a.name, b.name));
+    if (kind === 'audio') drawMusicLibrary(player.entries);
+    else drawVideoLibrary(player);
+    if (kind === 'video') {
+      player.subtitles = subtitles;
+      drawVideoSubtitles();
+    }
+    drawMediaList(kind);
+    const note = [truncated && '탐색 한도에 도달해 일부 ' + (kind === 'video' ? '영상' : '앨범') + '만 표시합니다.',
+      skipped && '읽지 못한 하위 폴더 ' + skipped + '개가 있습니다.'].filter(Boolean).join(' ');
+    const message = entries.length ? note : '이 폴더에 지원하는 ' + player.name + ' 파일이 없습니다. ' + note;
+    notice(statusId, message || (fromSettings ? '기본 폴더를 저장했습니다.' : ''));
+  } catch (error) {
+    if (player.loading === request) {
+      player.folder = undefined;
+      drawMediaList(kind);
+      notice(statusId, error.message, true);
+    }
+  } finally {
+    if (player.loading === request) player.loading = undefined;
+  }
+}
+
+async function loadVideoSubtitle(read, label) {
+  clearSubtitle();
+  const request = subtitleRequest = Symbol();
+  const playback = $('video-playback');
+  notice('video-subtitle-status', '자막을 불러오는 중…');
+  try {
+    const bytes = await read();
+    const { subtitleVtt } = await import('./media-subtitles.mjs');
+    if (subtitleRequest !== request) return;
+    const content = subtitleVtt(bytes);
+    subtitleUrl = URL.createObjectURL(new Blob([content], { type: 'text/vtt' }));
+    const track = document.createElement('track');
+    track.kind = 'subtitles';
+    track.label = label;
+    track.default = true;
+    track.src = subtitleUrl;
+    track.addEventListener('error', () => {
+      if (subtitleRequest === request) notice('video-subtitle-status', '자막을 표시할 수 없습니다.', true);
+    });
+    playback.append(track);
+    track.track.mode = 'showing';
+    notice('video-subtitle-status', '적용된 자막 · ' + label);
+  } catch (error) {
+    if (subtitleRequest === request) notice('video-subtitle-status', error.message, true);
+  }
+}
+
+function embeddedVideoSubtitles() {
+  const media = $('video-playback');
+  const added = media.querySelector('track')?.track;
+  return [...media.textTracks].filter(track => track !== added && ['subtitles', 'captions'].includes(track.kind));
+}
+
+function drawVideoSubtitles() {
+  const player = players.video;
+  const current = player.selected;
+  const files = current ? player.subtitles.slice().sort((a, b) =>
+    Number(b.folder === current.folder) - Number(a.folder === current.folder) ||
+    a.name.localeCompare(b.name, 'ko', { numeric: true })) : [];
+  const select = $('video-subtitle');
+  const selected = select.value;
+  const builtIn = current ? embeddedVideoSubtitles().map((track, index) =>
+    new Option('내장 · ' + (track.label || track.language || (index + 1)), 'embedded:' + index)) : [];
+  select.replaceChildren(new Option('자막 끄기', ''), ...builtIn, ...files.map(file =>
+    new Option(file.folder === current.folder ? file.name : (file.folder.split('/').at(-1) + ' / ' + file.name), file.path)));
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+
+function matchingVideoSubtitle(entry) {
+  const stem = name => name.replace(/\.[^.]+$/u, '').normalize('NFC').toLowerCase();
+  const video = stem(entry.name);
+  const files = players.video.subtitles.filter(file => {
+    if (file.folder !== entry.folder && !file.folder.startsWith(entry.folder === '/' ? '/' : entry.folder + '/')) return false;
+    const name = stem(file.name);
+    return name === video || (name.startsWith(video) && /^[. _-]/u.test(name.slice(video.length)));
+  });
+  return files.find(file => file.folder === entry.folder && stem(file.name) === video) ||
+    files.find(file => /(?:[. _-](?:ko|kor|korean|한글|한국어))\.[^.]+$/iu.test(file.name)) || files[0];
+}
+
+function selectNasSubtitle(path) {
+  if (path.startsWith('embedded:')) {
+    clearSubtitle();
+    const track = embeddedVideoSubtitles()[Number(path.slice(9))];
+    if (track) {
+      track.mode = 'showing';
+      $('video-subtitle').value = path;
+    }
+    return;
+  }
+  const file = players.video.subtitles.find(item => item.path === path);
+  if (!file) return clearSubtitle();
+  void loadVideoSubtitle(() => api.mediaSubtitle(file.folder || players.video.folder, file.path), file.name);
+  $('video-subtitle').value = file.path;
+}
+
+function showVideoLoading(message = '') {
+  $('video-loading-text').textContent = message;
+  $('video-loading').hidden = !message;
+}
+
+function drawVideoTransport() {
+  const media = $('video-playback');
+  const ready = media.hasAttribute('src');
+  const duration = Number.isFinite(media.duration) ? media.duration : 0;
+  const seek = $('video-seek');
+  seek.disabled = !duration;
+  seek.max = duration || 1;
+  if (!seek.matches(':active')) seek.value = media.currentTime;
+  $('video-time').textContent = musicTime(Number(seek.value)) + ' / ' + musicTime(duration);
+  const control = $('video-play');
+  const glyph = ready && !media.paused && !media.ended ? 'pause' : 'play';
+  if (control.dataset.glyph !== glyph) {
+    control.replaceChildren(icon(glyph));
+    control.dataset.glyph = glyph;
+  }
+  control.title = glyph === 'pause' ? '일시 정지' : '재생';
+  control.setAttribute('aria-label', control.title);
+  control.disabled = !ready;
+}
+
+async function playMedia(kind, entry) {
+  const player = players[kind];
+  if (!player.entries.includes(entry)) return;
+  if (kind === 'audio') return playMusic(entry);
+  stopMedia(kind);
+  const id = player.id = crypto.randomUUID();
+  player.selected = entry;
+  drawMediaList(kind);
+  notice(kind + '-status');
+  showVideoLoading('NAS에서 영상을 읽는 중…');
+  drawVideoSubtitles();
+  const playback = $(kind + '-playback');
+  try {
+    const { url } = await api.mediaPlay(id, kind, entry.folder || player.folder, entry.path);
+    if (player.id !== id) {
+      void api.closePreview(id).catch(() => {});
+      return;
+    }
+    playback.src = url;
+    drawMediaList(kind);
+    const subtitle = matchingVideoSubtitle(entry);
+    if (subtitle) selectNasSubtitle(subtitle.path);
+    try {
+      await playback.play();
+    } catch (error) {
+      if (player.id !== id || !/\.mkv$/iu.test(entry.name) || error.name === 'NotAllowedError') throw error;
+      playback.removeAttribute('src');
+      playback.load();
+      notice('video-status');
+      showVideoLoading('MKV 호환 재생을 준비하는 중…');
+      const compatible = await api.mediaCompatible(id);
+      if (player.id !== id) return;
+      playback.src = compatible.url;
+      drawMediaList(kind);
+      await playback.play();
+    }
+  } catch (error) {
+    if (player.id === id) {
+      showVideoLoading();
+      const message = error.name === 'NotAllowedError' ? '재생 버튼을 눌러 시작하세요.'
+        : error.name === 'NotSupportedError' ? '이 영상의 코덱을 재생할 수 없습니다.' : error.message;
+      notice(kind + '-status', message, true);
+    }
+  }
+}
+
+const audioElements = [$('audio-playback'), $('audio-preload')];
+let musicCoverUrl;
+
+function musicTime(seconds) {
+  const whole = Number.isFinite(seconds) ? Math.max(0, Math.floor(seconds)) : 0;
+  return Math.floor(whole / 60) + ':' + String(whole % 60).padStart(2, '0');
+}
+
+function trackName(entry) {
+  return entry.name.replace(/\.[^.]+$/u, '');
+}
+
+function drawMusicLibrary(entries) {
+  const albums = new Map();
+  const list = $('audio-list');
+  list.replaceChildren();
+  for (const entry of entries) {
+    if (!albums.has(entry.folder)) albums.set(entry.folder, []);
+    albums.get(entry.folder).push(entry);
+  }
+  for (const album of albums.values()) {
+    const group = make('details', '', 'music-album');
+    group.open = albums.size <= 3;
+    const heading = make('summary');
+    heading.append(make('span', album[0].album || '선택한 폴더'), make('small', album.length + '곡'));
+    const tracks = make('ol');
+    album.forEach((entry, index) => {
+      const item = make('li');
+      const control = entry.control = button('', () => void playMedia('audio', entry), 'music-track');
+      const number = make('span', String(index + 1), 'music-track-number');
+      const title = entry.titleLabel = make('strong', trackName(entry));
+      const playing = make('span', '', 'music-equalizer');
+      playing.setAttribute('aria-hidden', 'true');
+      playing.append(make('i'), make('i'), make('i'));
+      entry.durationLabel = make('span', '', 'music-track-duration');
+      control.append(number, playing, title, entry.durationLabel);
+      item.append(control);
+      tracks.append(item);
+    });
+    group.append(heading, tracks);
+    list.append(group);
+  }
+}
+
+function renderMusicTrack(job) {
+  const tags = job?.metadata;
+  $('audio-current').textContent = job ? tags?.title || trackName(job.entry) : '곡을 선택하세요';
+  $('music-track-detail').textContent = job
+    ? [tags?.artist, tags?.album || job.entry.album].filter(Boolean).join(' · ') : '재생할 곡을 골라 주세요';
+  const cover = $('music-cover');
+  cover.hidden = true;
+  cover.removeAttribute('src');
+  if (musicCoverUrl) URL.revokeObjectURL(musicCoverUrl);
+  musicCoverUrl = undefined;
+  if (tags?.cover) {
+    musicCoverUrl = URL.createObjectURL(new Blob([tags.cover.bytes], { type: tags.cover.type }));
+    cover.src = musicCoverUrl;
+    cover.hidden = false;
+  }
+}
+
+function drawMusicTransport() {
+  const job = players.audio.current;
+  const media = job && audioElements[job.slot];
+  const ready = media?.hasAttribute('src');
+  const playing = ready && !media.paused && !media.ended;
+  const control = $('music-play');
+  const glyph = playing ? 'pause' : 'play';
+  if (control.dataset.glyph !== glyph) {
+    control.replaceChildren(icon(glyph));
+    control.dataset.glyph = glyph;
+  }
+  control.title = playing ? '일시 정지' : '재생';
+  control.setAttribute('aria-label', control.title);
+  control.disabled = !ready;
+  const duration = ready && Number.isFinite(media.duration) ? media.duration : 0;
+  const elapsed = ready ? media.currentTime : 0;
+  const seek = $('music-seek');
+  seek.disabled = !duration;
+  seek.max = duration || 1;
+  if (!seek.matches(':active')) seek.value = elapsed;
+  seek.style.setProperty('--music-progress', (duration ? elapsed / duration * 100 : 0) + '%');
+  $('music-elapsed').textContent = musicTime(Number(seek.value));
+  $('music-duration').textContent = musicTime(duration);
+  $('music-toggle').classList.toggle('is-playing', playing);
+  $('music-panel').classList.toggle('is-playing', playing);
+}
+
+function releaseMusic(job) {
+  if (!job) return;
+  const media = audioElements[job.slot];
+  if (media.dataset.job === job.id) {
+    delete media.dataset.job;
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
+  void api.closePreview(job.id).catch(() => {});
+}
+
+function stopMusic() {
+  const player = players.audio;
+  const { current, next } = player;
+  player.current = player.next = player.selected = undefined;
+  releaseMusic(current);
+  releaseMusic(next);
+  renderMusicTrack();
+  drawMusicTransport();
+}
+
+function prepareMusic(entry, slot) {
+  const player = players.audio;
+  const media = audioElements[slot];
+  const job = { id: crypto.randomUUID(), entry, slot };
+  job.ready = api.mediaPlay(job.id, 'audio', entry.folder || player.folder, entry.path, slot, entry.cover)
+    .then(({ url, metadata }) => {
+      if (player.current !== job && player.next !== job) {
+        releaseMusic(job);
+        return;
+      }
+      job.metadata = metadata;
+      if (metadata?.title && entry.titleLabel) entry.titleLabel.textContent = metadata.title;
+      if (metadata?.duration && entry.durationLabel) entry.durationLabel.textContent = musicTime(metadata.duration);
+      media.dataset.job = job.id;
+      media.src = url;
+      media.load();
+    });
+  return job;
+}
+
+function warmNextMusic() {
+  const player = players.audio;
+  const { current } = player;
+  if (!current || player.next) return;
+  const entry = player.entries[player.entries.indexOf(current.entry) + 1];
+  if (!entry) return;
+  const job = player.next = prepareMusic(entry, 1 - current.slot);
+  void job.ready.catch(() => {
+    if (player.next === job) {
+      player.next = undefined;
+      releaseMusic(job);
+    }
+  });
+}
+
+function showAudioLoading(message) {
+  const status = $('audio-status');
+  notice('audio-status', message);
+  status.classList.toggle('audio-loading', !!message);
+  if (message) {
+    const spinner = make('span', '', 'signin-spinner');
+    spinner.setAttribute('aria-hidden', 'true');
+    status.prepend(spinner);
+  }
+}
+
+async function playMusic(entry, usePreload = true) {
+  const player = players.audio;
+  if (usePreload && player.current?.entry === entry) {
+    const media = audioElements[player.current.slot];
+    if (media.hasAttribute('src')) {
+      void media.play().catch(error => notice('audio-status', error.message, true));
+      return;
+    }
+  }
+  const previous = player.current;
+  const warm = usePreload && player.next?.entry === entry ? player.next : undefined;
+  if (!warm) releaseMusic(player.next);
+  player.next = undefined;
+  releaseMusic(previous);
+  const current = player.current = warm || prepareMusic(entry, previous?.slot ?? 0);
+  player.selected = entry;
+  renderMusicTrack(current);
+  drawMediaList('audio');
+  drawMusicTransport();
+  showAudioLoading('NAS에서 곡을 준비하는 중…');
+  try {
+    await current.ready;
+    if (player.current !== current) return;
+    renderMusicTrack(current);
+    drawMusicTransport();
+    const playback = audioElements[current.slot].play();
+    if (warm) {
+      let timer;
+      try {
+        await Promise.race([playback, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('미리 불러온 곡의 재생이 지연되었습니다.')), 12000);
+        })]);
+      } finally { clearTimeout(timer); }
+    } else await playback;
+    if (player.current === current) showAudioLoading();
+  } catch (error) {
+    if (player.current !== current) return;
+    if (warm && error.name !== 'NotAllowedError') {
+      await playMusic(entry, false);
+      return;
+    }
+    showAudioLoading();
+    let message = error.message;
+    if (error.name === 'NotAllowedError') message = '재생 버튼을 눌러 시작하세요.';
+    if (error.name === 'NotSupportedError') message = '이 파일의 형식이나 코덱을 재생할 수 없습니다.';
+    notice('audio-status', message, true);
+  }
+}
+
+function moveMusic(offset) {
+  const { entries, selected } = players.audio;
+  if (!selected) return;
+  const entry = entries[entries.indexOf(selected) + offset];
+  if (entry) void playMedia('audio', entry);
+}
+
+for (const kind of Object.keys(players)) {
+  drawMediaList(kind);
+  $('settings-' + kind + '-pick').addEventListener('click', () => pickMediaFolder(kind));
+}
+const videoPlayback = $('video-playback');
+videoPlayback.textTracks.addEventListener('addtrack', drawVideoSubtitles);
+for (const event of ['loadstart', 'waiting', 'seeking', 'seeked', 'timeupdate', 'loadedmetadata', 'canplay', 'playing', 'pause', 'ended', 'error']) {
+  videoPlayback.addEventListener(event, () => {
+    drawVideoTransport();
+    if (!videoPlayback.hasAttribute('src')) return;
+    if (event === 'loadedmetadata') drawVideoSubtitles();
+    if (['loadstart', 'waiting', 'seeking'].includes(event)) showVideoLoading('영상을 불러오는 중…');
+    else if (['canplay', 'playing', 'seeked', 'error', 'ended'].includes(event)) showVideoLoading();
+    if (event === 'error') {
+      const message = videoPlayback.error?.code === 2
+        ? 'NAS에서 영상 데이터를 읽는 중 연결이 끊겼습니다.' : '이 영상의 코덱을 재생할 수 없습니다.';
+      notice('video-status', message, true);
+    }
+  });
+}
+$('video-play').addEventListener('click', () => {
+  if (videoPlayback.paused) void videoPlayback.play().catch(error => notice('video-status', error.message, true));
+  else videoPlayback.pause();
+});
+$('video-seek').addEventListener('change', event => { videoPlayback.currentTime = Number(event.currentTarget.value); });
+$('video-volume').addEventListener('input', event => { videoPlayback.volume = Number(event.currentTarget.value) / 100; });
+$('video-fullscreen').append(icon('fullscreen'));
+$('video-fullscreen').addEventListener('click', () => {
+  const action = document.fullscreenElement ? document.exitFullscreen() : $('video-stage').requestFullscreen();
+  void action.catch(error => notice('video-status', error.message, true));
+});
+for (const [slot, media] of audioElements.entries()) {
+  for (const event of ['timeupdate', 'loadedmetadata', 'play', 'pause', 'ended', 'error', 'waiting', 'seeking', 'seeked', 'playing']) {
+    media.addEventListener(event, () => {
+      if (players.audio.current?.slot !== slot || media.dataset.job !== players.audio.current.id) return;
+      drawMusicTransport();
+      if (event === 'play') warmNextMusic();
+      if (event === 'waiting' || event === 'seeking') showAudioLoading('재생 위치를 불러오는 중…');
+      if (['playing', 'seeked', 'ended', 'error'].includes(event)) showAudioLoading();
+      if (event === 'ended') moveMusic(1);
+      if (event === 'error') notice('audio-status', '이 파일의 형식이나 코덱을 재생할 수 없습니다.', true);
+    });
+  }
+}
+$('music-art').prepend(icon('audio'));
+$('music-cover').addEventListener('error', event => { event.currentTarget.hidden = true; });
+$('audio-prev').append(icon('previous'));
+$('audio-next').append(icon('next'));
+$('music-play').addEventListener('click', () => {
+  const job = players.audio.current;
+  if (!job) return;
+  const media = audioElements[job.slot];
+  if (media.paused) void media.play().catch(error => notice('audio-status', error.message, true));
+  else media.pause();
+});
+$('music-seek').addEventListener('change', event => {
+  const job = players.audio.current;
+  if (job) audioElements[job.slot].currentTime = Number(event.currentTarget.value);
+});
+$('music-seek').addEventListener('input', event => { $('music-elapsed').textContent = musicTime(Number(event.currentTarget.value)); });
+$('music-volume').addEventListener('input', event => {
+  for (const media of audioElements) media.volume = Number(event.currentTarget.value) / 100;
+});
+drawMusicTransport();
+$('music-toggle').append(icon('audio', '#a9c6f8'));
+const musicIndicator = make('span', '', 'music-equalizer');
+musicIndicator.setAttribute('aria-hidden', 'true');
+musicIndicator.append(make('i'), make('i'), make('i'));
+$('music-toggle').append(musicIndicator);
+$('music-hide').append(icon('sidebar', '#a9c6f8'));
+$('music-toggle').addEventListener('click', () => {
+  if (!musicOpen) return openMediaPlayer('audio');
+  musicOpen = false;
+  drawMusicPanel();
+});
+$('music-hide').addEventListener('click', () => {
+  musicOpen = false;
+  drawMusicPanel();
+  $('music-toggle').focus();
+});
+$('audio-prev').addEventListener('click', () => moveMusic(-1));
+$('audio-next').addEventListener('click', () => moveMusic(1));
+$('video-back').addEventListener('click', () => {
+  videoOpen = false;
+  stopMedia('video');
+  drawMediaList('video');
+  showPage();
+  $('groups').querySelector('.tile:has(.video)')?.focus();
+});
+$('video-subtitle').addEventListener('change', event => selectNasSubtitle(event.currentTarget.value));
+$('video-local-subtitle').addEventListener('click', () => $('video-subtitle-input').click());
+$('video-subtitle-input').addEventListener('change', event => {
+  const { files } = event.currentTarget;
+  const file = files[0];
+  event.currentTarget.value = '';
+  if (!file) return;
+  if (file.size > 2 * 1024 ** 2 || !/\.(?:srt|vtt|ass|ssa|smi)$/iu.test(file.name)) {
+    return notice('video-subtitle-status', '2 MiB 이하의 SRT, VTT, ASS, SSA 또는 SMI 자막을 선택하세요.', true);
+  }
+  void loadVideoSubtitle(async () => new Uint8Array(await file.arrayBuffer()), file.name);
+});
+
+function returnHome() {
+  if (servicePage === 'server' && !$('signin').hidden) {
     servicePage = undefined;
     showPage();
+    animateSigninPanel();
+    $('signin-services').querySelector('.tile')?.focus({ preventScroll: true });
+    return;
+  }
+  navigate(() => {
+    const glyph = servicePage === 'ai' ? 'ai-assistant' : 'server-update';
+    servicePage = servicePage === 'ai' ? aiBackPage : undefined;
+    showPage();
+    if (!$('server-home').hidden && glyph === 'ai-assistant') {
+      $('server-ai').focus();
+      return;
+    }
     const source = state.connected ? $('groups') : $('signin-services');
     source.querySelector('.tile:has(.' + glyph + ')')?.focus();
   });
@@ -1612,6 +2486,27 @@ for (const id of ['server-home-back', 'server-home-logout']) {
   }, error => notice('server-home-error', error.message, true)));
 }
 $('ai-back').addEventListener('click', returnHome);
+$('ai-login-icon').append(icon('sparkles'));
+$('ai-login-back').addEventListener('click', returnHome);
+$('ai-login-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (aiLoginPending || state.serverRestoring || state.aiEmail) return;
+  const { email, password, remember } = event.currentTarget.elements;
+  const credentials = { email: email.value, password: password.value, remember: remember.checked, forAi: true };
+  password.value = '';
+  aiLoginPending = true;
+  notice('ai-login-error');
+  showPage();
+  try {
+    apply(await api.serverUpdaterLogin(credentials));
+  } catch (error) {
+    notice('ai-login-error', error.message);
+  } finally {
+    aiLoginPending = false;
+    showPage();
+    if (!$('ai-login').hidden) password.focus();
+  }
+});
 $('ai-new-chat').addEventListener('click', newAiChat);
 document.addEventListener('pointerdown', event => {
   const usage = $('ai-usage');
@@ -1623,12 +2518,41 @@ $('ai-usage').addEventListener('keydown', event => {
   $('ai-usage').open = false;
   $('ai-usage-toggle').focus();
 });
+$('ai-attach').append(icon('add'));
+$('ai-attach').addEventListener('click', async () => {
+  const chat = activeAiChat;
+  if (!chat || $('ai-attach').disabled) return;
+  choosingAiAttachments = true;
+  drawAiRequestStatus();
+  notice('ai-error');
+  try {
+    const { files, errors } = await api.aiPickFiles();
+    if (!aiChats.includes(chat)) return;
+    const drafts = chat.draftFiles ??= [];
+    for (const file of files) {
+      if (drafts.some(item => item.name === file.name && item.text === file.text)) continue;
+      if (drafts.length === 3) {
+        errors.push('파일은 최대 3개까지 첨부할 수 있습니다.');
+        break;
+      }
+      drafts.push(file);
+    }
+    if (activeAiChat === chat && errors.length) notice('ai-error', errors.join(' · '), true);
+  } catch (error) {
+    if (activeAiChat === chat) notice('ai-error', error.message, true);
+  } finally {
+    choosingAiAttachments = false;
+    drawAiAttachments();
+    drawAiRequestStatus();
+  }
+});
 $('ai-send').append(icon('up'));
 $('ai-stop').append(icon('stop'));
 $('ai-stop').addEventListener('click', async () => {
   const request = aiRequest;
   if (!request) return;
   const previousPhase = request.phase;
+  request.cancelledWhileQueued = previousPhase === 'queued';
   request.phase = 'stopping';
   drawAiRequestStatus();
   try {
@@ -1636,6 +2560,7 @@ $('ai-stop').addEventListener('click', async () => {
   } catch (error) {
     if (aiRequest !== request) return;
     request.phase = previousPhase;
+    request.cancelledWhileQueued = false;
     drawAiRequestStatus();
     if (activeAiChat === request.chat) notice('ai-error', error.message);
   }
@@ -1669,25 +2594,32 @@ $('ai-form').addEventListener('keydown', event => {
 $('ai-form').addEventListener('input', drawAiRequestStatus);
 $('ai-form').addEventListener('submit', async event => {
   event.preventDefault();
-  if (!state?.connected || aiRequest || !activeAiChat || $('ai-send').disabled) return;
+  if (!state?.aiEmail || aiRequest || !activeAiChat || $('ai-send').disabled) return;
   const input = event.currentTarget.elements.message;
   const content = input.value.trim();
-  if (!content) return;
   const chat = activeAiChat;
-  const message = { role: 'user', content };
+  const attachments = chat.draftFiles ?? [];
+  if (!content && !attachments.length) return;
+  chat.draftFiles = [];
+  const message = { role: 'user', content, attachments };
   const request = aiRequest = { id: crypto.randomUUID(), chat, answer: '', phase: 'preparing', startedAt: performance.now() };
   chat.messages.push(message);
-  if (chat.messages.length === 1) chat.title = content.replace(/\s+/gu, ' ').slice(0, 45);
+  if (chat.messages.length === 1) chat.title = (content || attachments[0].name).replace(/\s+/gu, ' ').slice(0, 45);
   clearTimeout(aiTitleTimer);
   input.value = '';
   notice('ai-error');
   drawAiChat(true);
   try {
-    const answer = await api.aiChat(request.id, chat.id, content, $('ai-effort').value);
+    const answer = await api.aiChat(request.id, chat.id, content, $('ai-effort').value, attachments);
     if (aiRequest !== request) return;
     if (answer) chat.messages.push({ role: 'assistant', content: answer });
+    else if (request.cancelledWhileQueued) {
+      chat.draftFiles = attachments;
+      if (activeAiChat === chat && !input.value) input.value = content;
+    }
   } catch (error) {
     if (aiRequest !== request) return;
+    chat.draftFiles = attachments;
     if (activeAiChat === chat) {
       notice('ai-error', error.message);
       if (!input.value) input.value = content;
@@ -1702,9 +2634,17 @@ $('ai-form').addEventListener('submit', async event => {
     }
   }
 });
+for (const [id, feature, label, glyph] of [
+  ['server-terminal', 'terminal', '터미널', 'terminal'], ['server-ai', 'ai-assistant', 'AI', 'sparkles']
+]) {
+  const shortcut = tile(label, feature, () => activate(feature), glyph);
+  shortcut.id = id;
+  $('server-home-tiles').append(shortcut);
+}
 $('server-monitor-toggle').append(icon('activity', '#a9c6f8'));
 $('server-monitor-toggle').addEventListener('click', () => {
-  setServerMonitoringView($('server-monitoring').hidden);
+  setServerMonitoringView($('server-monitor-controls').hidden);
+  $('server-monitor-title').scrollIntoView({ block: 'nearest' });
 });
 $('server-deploy-form').addEventListener('submit', event => {
   event.preventDefault();
@@ -1714,10 +2654,35 @@ $('server-deploy-form').addEventListener('submit', event => {
   notice('server-home-error');
   void api.serverDeploy(project, asset).catch(error => notice('server-home-error', error.message, true));
 });
-$('server-log-dialog').addEventListener('close', () => {
-  logProject = undefined;
-  clearTimeout(logTimer);
+function setServerProjectForm(open) {
+  $('server-file-add').hidden = !open;
+  $('server-file-toggle').setAttribute('aria-expanded', String(open));
+}
+
+function openServerProjectForm() {
+  setServerProjectForm(true);
+  elements('server-file-form').name.focus();
+}
+
+$('server-file-toggle').addEventListener('click', () => {
+  if ($('server-file-add').hidden) openServerProjectForm();
+  else setServerProjectForm(false);
 });
+
+async function checkServerSites(id) {
+  notice('server-monitor-error');
+  try { apply(await api.serverMonitorCheck(id)); }
+  catch (error) { notice('server-monitor-error', error.message, true); }
+}
+
+$('server-monitor-check').addEventListener('click', () => void checkServerSites());
+for (const mode of ['list', 'grid']) {
+  $('server-sites-' + mode).addEventListener('click', () => {
+    $('server-monitor-targets').classList.toggle('as-grid', mode === 'grid');
+    for (const option of ['list', 'grid']) $('server-sites-' + option).setAttribute('aria-pressed', String(option === mode));
+  });
+}
+
 $('server-github-open').addEventListener('click', () => {
   notice('server-github-error');
   $('server-github-dialog').showModal();
@@ -1784,7 +2749,8 @@ $('server-file-form').addEventListener('submit', event => {
     await api.serverFileAdd({ name: form.name.value, url: form.url.value });
     $('server-file-form').reset();
     $('server-github-repo').selectedIndex = 0;
-    $('server-file-add').open = false;
+    setServerProjectForm(false);
+    $('server-file-toggle').focus();
   }, error => notice('server-home-error', error.message, true))();
 });
 for (const [id, save] of [['server-monitor-target', (input) => api.serverMonitorTarget(input)],
@@ -1856,7 +2822,7 @@ for (const id of ['account-button', 'signin-settings', 'server-settings']) {
   $(id).addEventListener('click', () => openSettings());
 }
 for (const control of settingsSections) {
-  const glyphs = { account: 'account', launcher: 'grid', sync: 'sync' };
+  const glyphs = { account: 'account', launcher: 'grid', media: 'video', sync: 'sync' };
   control.prepend(icon(glyphs[control.dataset.settingsSection]));
   control.addEventListener('click', () => {
     if (settingsSection === control.dataset.settingsSection) return;
@@ -1873,6 +2839,8 @@ function closeSettings() {
   else $('signin-settings').focus();
   settingsTrigger = undefined;
 }
+const uninstallMac = $('uninstall-mac');
+uninstallMac.addEventListener('click', busy(uninstallMac, () => api.uninstallMac(), error => toast(error.message)));
 $('settings-back').addEventListener('click', () => navigate(closeSettings));
 const reportSettings = error => notice('account-error', error.message, true);
 for (const [id, name] of [['settings-tray', 'trayVisible'], ['settings-launch', 'launchAtLogin'],
@@ -1899,6 +2867,7 @@ $('account-github-open').addEventListener('click', () => {
 async function requestUpdate(restart = false) {
   if (!state || updateRequested || state.applyingUpdate || state.connecting) return;
   dismissedUpdate = undefined;
+  updateButtonError = '';
   if (!restart && state.update?.phase === 'ready') return drawUpdate();
   restartingUpdate = restart;
   updateRequested = true;
@@ -1910,7 +2879,7 @@ async function requestUpdate(restart = false) {
   } catch (error) {
     if (!$('signin-service-status').hidden && !$('signin').hidden) toast(error.message);
     else if (!$('signin').hidden) notice(signinError, error.message);
-    else if (settingsOpen) reportSettings(error);
+    else if (settingsOpen) updateButtonError = error.message;
     else toast(error.message);
   } finally {
     updateRequested = false;
@@ -1933,19 +2902,23 @@ signinUpdateButton.addEventListener('pointerenter', () => {
 for (const id of ['signin-update-check', 'account-update-check']) {
   $(id).addEventListener('click', async () => {
     if (!state || $(id).disabled) return;
-    if (['available', 'ready'].includes(state.update?.phase)) return requestUpdate();
+    if (['available', 'ready'].includes(state.update?.phase)) {
+      return requestUpdate(id === 'account-update-check' && state.update.phase === 'ready');
+    }
+    updateButtonError = '';
+    drawUpdate();
     try {
       const checked = await api.checkUpdate();
-      if (id === 'account-update-check' && checked.update?.phase === 'current') {
-        notice('update-status', '최신 버전을 사용 중입니다.');
-      }
       if (id === 'signin-update-check' && !state.connected && !state.connecting &&
           checked.update?.phase === 'current' && state.update?.phase === 'current') {
         showSigninCurrent();
       }
     } catch (error) {
       if (id === 'signin-update-check' && !$('signin-service-status').hidden && !$('signin').hidden) toast(error.message);
-      else notice(id === 'signin-update-check' ? (servicePage === 'server' ? 'server-login-error' : 'login-error') : 'account-error', error.message, true);
+      else if (id === 'account-update-check') {
+        updateButtonError = error.message;
+        drawUpdate();
+      } else notice(servicePage === 'server' ? 'server-login-error' : 'login-error', error.message, true);
     }
   });
 }
@@ -2050,17 +3023,58 @@ $('mkdir-form').addEventListener('submit', event => {
   }, error => notice('mkdir-error', error.message, true))();
 });
 $('open-selection').addEventListener('click', () => { void openEntry(selectedFiles()[0]); });
+let renameTarget;
+$('rename-selection').addEventListener('click', () => {
+  const [entry] = selectedFiles();
+  if (!entry) return;
+  renameTarget = { folder: browserPath, path: entry.path };
+  const input = elements('rename-form').name;
+  input.value = entry.name;
+  notice('rename-error');
+  $('rename-dialog').showModal();
+  const extension = entry.directory ? -1 : entry.name.lastIndexOf('.');
+  input.setSelectionRange(0, extension > 0 ? extension : entry.name.length);
+});
+$('rename-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const { folder, path } = renameTarget;
+  void busy(event.submitter, async () => {
+    await api.renameFile(folder, path, elements('rename-form').name.value);
+    $('rename-dialog').close();
+    if (browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
+    toast('이름을 바꿨습니다.');
+  }, error => notice('rename-error', error.message, true))();
+});
+let extractTarget;
+$('extract-selection').addEventListener('click', () => {
+  const [entry] = selectedFiles();
+  if (!entry) return;
+  extractTarget = { folder: browserPath, path: entry.path };
+  $('extract-name').textContent = entry.name;
+  $('extract-form').querySelector('button[value="folder"]').title = entry.name.slice(0, -4) + '/';
+  $('extract-dialog').showModal();
+});
+$('extract-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const { folder, path } = extractTarget;
+  const destination = event.submitter.value;
+  $('extract-dialog').close();
+  void transfer(async () => {
+    const name = await api.extractArchive(folder, path, destination);
+    return { message: name ? name + ' 폴더에 압축을 풀었습니다.' : '현재 폴더에 압축을 풀었습니다.' };
+  }, undefined, 'extract').then(async result => {
+    if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
+  });
+});
 $('download-selection').addEventListener('click', () => {
   const items = selectedFiles().map(file => file.path);
   void transfer(async () => {
     const result = await api.download(browserPath, items);
     if (!result) return;
-    const message = `다운로드 ${result.downloaded}개` +
+    return { failed: !!result.errors, message: `다운로드 ${result.downloaded}개` +
       (result.skipped ? ` · 기존 파일 ${result.skipped}개` : '') +
-      (result.errors ? ` · 실패 ${result.errors}개 · ${result.message}` : '');
-    if (browserMode) notice('browser-status', message, !!result.errors);
-    else toast(message);
-  });
+      (result.errors ? ` · 실패 ${result.errors}개 · ${result.message}` : '') };
+  }, undefined, 'download');
 });
 $('delete-selection').addEventListener('click', () => {
   const mode = browserMode;
@@ -2124,24 +3138,26 @@ document.addEventListener('keydown', event => {
 $('up-button').addEventListener('click', () => navigateFolder(parentOf(browserPath)));
 $('refresh-button').addEventListener('click', () => loadFolder(browserPath));
 $('pick-button').addEventListener('click', () => navigate(() => {
+  if (mediaPicker) {
+    const kind = mediaPicker;
+    const folder = browserPath;
+    leaveBrowser();
+    if (!settingsOpen) showMediaPlayer(kind);
+    void loadMediaFolder(kind, folder, settingsOpen);
+    return;
+  }
   elements(pickerDialog === 'area-dialog' ? 'area-form' : 'settings-form').remote.value = browserPath;
   leaveBrowser();
 }));
 $('upload-button').addEventListener('click', () => {
-  let result;
   const folder = browserPath;
-  void transfer(async () => { result = await api.upload(folder); }).then(async () => {
-    if (result && browserMode === 'remote' && browserPath === folder) {
-      const pending = loadFolder(folder);
-      const generation = browseGeneration;
-      await pending;
-      if (generation !== browseGeneration) return;
-      const message = `업로드 완료 ${result.uploaded}개` +
-        (result.errors.length ? ` · 실패 ${result.errors.length}개 · ${result.errors[0]}` : '');
-      notice('browser-status', message, !!result.errors.length);
-    } else if (result) {
-      toast(result.errors.length ? result.errors[0] : `${result.uploaded}개 파일을 업로드했습니다.`);
-    }
+  void transfer(async () => {
+    const result = await api.upload(folder);
+    if (!result) return;
+    return { failed: !!result.errors.length, message: `업로드 ${result.uploaded}개` +
+      (result.errors.length ? ` · 실패 ${result.errors.length}개 · ${result.errors[0]}` : '') };
+  }, undefined, 'upload').then(async result => {
+    if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
   });
 });
 $('editor-form').addEventListener('submit', event => {
@@ -2157,23 +3173,57 @@ $('editor-form').addEventListener('submit', event => {
   }, error => notice('editor-error', error.message, true))();
 });
 
-$('transfer-button').append(icon('up', '#ecedef'));
-api.onTransfer(info => {
-  if (!transferring || browserMode !== 'remote') return;
-  $('transfer-indicator').hidden = false;
-  const button = $('transfer-button');
-  if (button.dataset.direction !== info.direction) {
-    button.replaceChildren(icon(info.direction === 'upload' ? 'up' : 'downloads', '#ecedef'));
-    button.dataset.direction = info.direction;
+const fileTransferBar = $('file-transfer-bar');
+let fileTransferTimer;
+
+const transferLabels = {
+  upload: { title: '파일 업로드', glyph: 'up' },
+  download: { title: '파일 다운로드', glyph: 'downloads' },
+  extract: { title: 'ZIP 압축 풀기', glyph: 'extract' }
+};
+
+function showFileTransfer(direction, title, detail, result = '') {
+  clearTimeout(fileTransferTimer);
+  const mark = $('transfer-mark');
+  const glyph = result === 'success' ? 'check' : result === 'error' ? 'activity' : transferLabels[direction].glyph;
+  if (mark.dataset.glyph !== glyph) {
+    mark.replaceChildren(icon(glyph, '#ecedef'));
+    mark.dataset.glyph = glyph;
   }
-  $('transfer-title').textContent = info.direction === 'upload' ? '파일 업로드 중' : '파일 다운로드 중';
-  $('transfer-name').textContent = info.name;
+  fileTransferBar.dataset.result = result;
+  if ($('transfer-title').textContent !== title) $('transfer-title').textContent = title;
+  if ($('transfer-name').textContent !== detail) $('transfer-name').textContent = detail;
+  $('transfer-name').title = detail;
+  if (fileTransferBar.hidden) {
+    fileTransferBar.hidden = false;
+    void fileTransferBar.offsetWidth;
+  }
+  fileTransferBar.dataset.visible = fileTransferBar.dataset.expanded = '';
+}
+
+function finishFileTransfer(direction, message, failed) {
+  showFileTransfer(direction, transferLabels[direction].title + (failed ? ' 실패' : ' 완료'),
+    message, failed ? 'error' : 'success');
+  $('transfer-progress').hidden = true;
+  $('transfer-details').textContent = '';
+  fileTransferTimer = setTimeout(() => {
+    delete fileTransferBar.dataset.expanded;
+    delete fileTransferBar.dataset.visible;
+    fileTransferTimer = setTimeout(() => { fileTransferBar.hidden = true; }, 550);
+  }, failed ? 8000 : 3000);
+}
+
+api.onTransfer(info => {
+  if (!transferring) return;
+  showFileTransfer(info.direction, transferLabels[info.direction].title + ' 진행 중…', info.name);
   const meter = $('transfer-progress');
-  const percent = info.total === null ? null : info.total === 0 ? 100 : Math.min(100, Math.round(info.bytes / info.total * 100));
-  button.style.setProperty('--transfer-progress', (percent ?? 0) + '%');
-  if (percent === null) meter.removeAttribute('value');
-  else meter.value = percent;
-  $('transfer-details').textContent = (percent === null ? bytes(info.bytes) : percent + '%') + ' · ' + bytes(info.rate) + '/s';
+  const percent = info.total === null ? null : info.total === 0 ? 100 :
+    Math.max(0, Math.min(100, Math.round(info.bytes / info.total * 100)));
+  meter.hidden = false;
+  if (percent === null) meter.removeAttribute('aria-valuenow');
+  else meter.setAttribute('aria-valuenow', percent);
+  meter.style.setProperty('--progress', (percent ?? 0) + '%');
+  $('transfer-details').textContent = percent === null ? (info.direction === 'extract' ? '' : bytes(info.bytes)) : percent + '%';
 });
 
 drawTiles();

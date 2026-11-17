@@ -1,7 +1,7 @@
 {
   "name": "sonac_launcher",
   "productName": "sonac launcher",
-  "version": "0.3.21",
+  "version": "0.3.30",
   "description": "Windows와 macOS용 개인 파일 런처",
   "main": "src/main.js",
   "private": true,
@@ -16,8 +16,10 @@
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
+    "cfb": "1.2.2",
     "fflate": "0.8.3",
     "firebase": "13.3.0",
+    "music-metadata": "12.2.0",
     "node-pty": "1.1.0",
     "pdfjs-dist": "6.5.438",
     "saxes": "5.0.1",
@@ -29,5 +31,5 @@
     "electron": "44.11.2",
     "resedit": "3.1.0"
   },
-  "releaseVersion": "0.3.7"
+  "releaseVersion": "0.3.9.4"
 }

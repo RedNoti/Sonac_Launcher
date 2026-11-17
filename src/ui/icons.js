@@ -6,10 +6,15 @@ const outlines = {
   star: 'M24 6l5.6 11.4 12.6 1.8-9.1 8.9 2.2 12.5L24 34.7l-11.3 5.9 2.2-12.5-9.1-8.9 12.6-1.8Z',
   add: 'M24 9v30M9 24h30',
   check: 'M10 24l9 9 19-19',
+  extract: 'M8 20h32v17H8ZM9 20l4-9h22l4 9M24 13V5m-5 4 5 4 5-4M20 28h8',
   folderAdd: 'M6 14a3 3 0 0 1 3-3h10l4 5h16a3 3 0 0 1 3 3v17a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3ZM24 22v12m-6-6h12',
   home: 'M7 22 24 8l17 14M11 19v21h10V28h6v12h10V19',
   up: 'M24 38V10m-10 10 10-10 10 10',
+  play: 'M17 10 37 24 17 38Z',
+  more: 'M10 24a2 2 0 1 0 4 0 2 2 0 1 0-4 0Zm12 0a2 2 0 1 0 4 0 2 2 0 1 0-4 0Zm12 0a2 2 0 1 0 4 0 2 2 0 1 0-4 0Z',
   stop: 'M14 14h20v20H14Z',
+  fullscreen: 'M6 19V6h13M29 6h13v13M42 29v13H29M19 42H6V29',
+  sidebar: 'M9 10h30a3 3 0 0 1 3 3v22a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3V13a3 3 0 0 1 3-3Zm21 0v28',
   grid: 'M8 8h12v12H8ZM28 8h12v12H28ZM8 28h12v12H8ZM28 28h12v12H28Z',
   list: 'M16 12h24M16 24h24M16 36h24M8 12h.01M8 24h.01M8 36h.01',
   pencil: 'M9 32 31 10l7 7-22 22-9 2Zm18-18 7 7',
@@ -31,16 +36,57 @@ const outlines = {
   file: 'M13 7h14l9 9v25H13ZM27 7v10h9m-17 9h11m-11 6h11'
 };
 
+const referenceOutlines = {
+  dsm: { path: 'M12 7h5.5M12 17h5.5', rects: [[3.5,3.5,17,7,2.2],[3.5,13.5,17,7,2.2]], dots: [[7,7,.9],[7,17,.9]] },
+  video: { path: 'M10 9l5 3-5 3z', rects: [[3.5,4.5,17,15,1.2]] },
+  audio: { path: 'M9.5 17.5V6.5l8-2v10.5', ellipses: [[7,17.8,2.6,1.9],[15.5,15.2,2.6,1.9]] },
+  github: { path: 'M6.5 7v10M17.5 11c0 3.5-4 4-11 6', circles: [[6.5,5,2],[6.5,19,2],[17.5,9,2]] },
+  terminal: { path: 'M7 10l3 2.2L7 14.4M12.5 15.5h4', rects: [[3,4,18,16,3.2]] },
+  sparkles: { path: 'M9 7.5c.6 3.6 1.9 4.9 5.5 5.5-3.6.6-4.9 1.9-5.5 5.5-.6-3.6-1.9-4.9-5.5-5.5C7.1 12.4 8.4 11.1 9 7.5zM17.5 3v5M15 5.5h5M17.5 15v5M15 17.5h5' },
+  sync: { path: 'M20 11a8 8 0 0 0-14.5-4M4 4v3.5h3.5M4 13a8 8 0 0 0 14.5 4M20 20v-3.5h-3.5' },
+  pencil: { path: 'M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4' },
+  account: { path: 'M5 20c.8-3.6 3.5-5.5 7-5.5s6.2 1.9 7 5.5', circles: [[12,8,3.5]] },
+  add: { path: 'M12 5v14M5 12h14' },
+  pause: { path: 'M9 5v14m6-14v14' },
+  previous: { path: 'M19 5v14L9 12zM5 5v14' },
+  next: { path: 'M5 5v14l10-7zM19 5v14' }
+};
+
 function icon(name, color = '#fff') {
   const canvas = document.createElement('canvas');
   canvas.width = canvas.height = 144;
   canvas.setAttribute('aria-hidden', 'true');
   const draw = canvas.getContext('2d');
-  draw.scale(3, 3);
+  const reference = referenceOutlines[name];
+  draw.scale(reference ? 6 : 3, reference ? 6 : 3);
   draw.strokeStyle = color;
-  draw.lineWidth = 1.8;
+  draw.lineWidth = reference ? 1.6 : 1.8;
   draw.lineCap = 'round';
   draw.lineJoin = 'round';
-  draw.stroke(new Path2D(outlines[name]));
+  if (!reference) draw.stroke(new Path2D(outlines[name]));
+  else {
+    draw.stroke(new Path2D(reference.path));
+    for (const rect of reference.rects ?? []) {
+      draw.beginPath();
+      draw.roundRect(...rect);
+      draw.stroke();
+    }
+    for (const circle of reference.circles ?? []) {
+      draw.beginPath();
+      draw.arc(...circle, 0, 2 * Math.PI);
+      draw.stroke();
+    }
+    for (const ellipse of reference.ellipses ?? []) {
+      draw.beginPath();
+      draw.ellipse(...ellipse, -Math.PI / 9, 0, 2 * Math.PI);
+      draw.stroke();
+    }
+    draw.fillStyle = color;
+    for (const dot of reference.dots ?? []) {
+      draw.beginPath();
+      draw.arc(...dot, 0, 2 * Math.PI);
+      draw.fill();
+    }
+  }
   return canvas;
 }

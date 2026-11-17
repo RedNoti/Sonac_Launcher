@@ -26,6 +26,18 @@ export async function writeShortcutProperties(filename, appId) {
   ].join('\r\n'));
 }
 
+export async function writeUninstallAction(filename) {
+  const command = '"[SystemFolder]WindowsPowerShell\\v1.0\\powershell.exe"' +
+    ' -NoProfile -NonInteractive -STA -WindowStyle Hidden -EncodedCommand [SonacUninstallScript]';
+  await writeFile(filename, [
+    'Action\tType\tSource\tTarget\tExtendedType',
+    's72\ti2\tS72\tS255\tI4',
+    'CustomAction\tAction',
+    ['AskToRemoveLocalData', 34 | 64, 'LocalAppDataFolder', command, ''].join('\t'),
+    ''
+  ].join('\r\n'));
+}
+
 const xml = value => value.replace(/[&<>"']/gu, char => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
 })[char]);
@@ -67,6 +79,8 @@ export async function writeMsiSource(source, output, { name, version }) {
     </Directory>`;
   }
 
+  const cleanup = Buffer.from(await readFile(new URL('./windows-uninstall.ps1', import.meta.url), 'utf8'), 'utf16le')
+    .toString('base64');
   const payload = await tree('', 'INSTALLFOLDER', 'SonacLauncher');
   await writeFile(output, `<?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -78,7 +92,9 @@ export async function writeMsiSource(source, output, { name, version }) {
       <UpgradeVersion Minimum="${version}" IncludeMinimum="no" OnlyDetect="yes" Property="SONAC_NEW_VERSION"/>
     </Upgrade>
     <Condition Message="A newer sonac launcher is already installed.">Installed OR NOT SONAC_NEW_VERSION</Condition>
+    <Property Id="SonacUninstallScript" Value="${cleanup}"/>
     <InstallExecuteSequence>
+      <Custom Action="AskToRemoveLocalData" After="InstallFinalize">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE AND UILevel &gt; 2</Custom>
       <RemoveExistingProducts After="InstallInitialize"/>
     </InstallExecuteSequence>
     <Media Id="1" Cabinet="sonac.cab" EmbedCab="yes"/>

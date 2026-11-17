@@ -372,9 +372,9 @@ function initWorkspace() {
     document.querySelector('.tile .github')?.parentElement.focus();
   }));
   $('github-shortcut').addEventListener('click', () => void api.openLink('githubShortcut').catch(reportGithub));
-  $('github-token-help').addEventListener('click', () => {
-    void api.openLink('githubToken').catch(reportGithub);
-  });
+  for (const [id, action] of [['github-token-help', 'githubToken'], ['github-classic-token-help', 'githubClassicToken']]) {
+    $(id).addEventListener('click', () => void api.openLink(action).catch(reportGithub));
+  }
   $('github-refresh').addEventListener('click', busy($('github-refresh'), refreshGithub, reportGithub));
   $('github-disconnect').addEventListener('click', busy($('github-disconnect'), () => api.githubDisconnect(), reportGithub));
   $('github-connect').addEventListener('submit', event => {

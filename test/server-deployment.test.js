@@ -111,3 +111,18 @@ test('redeploying extracts new bytes for same-named files in the new release dir
   assert.equal(await fs.readFile(path.join(previous, 'server.cjs'), 'utf8'), 'old');
   await assert.rejects(fs.access(path.join(next, 'obsolete.txt')), { code: 'ENOENT' });
 });
+
+test('NAS ZIP extraction preserves empty folders and refuses conflicting parent paths', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'sonac-extract-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const signal = new AbortController().signal;
+  const options = { preserveDirectories: true };
+  const conflicting = zipSync({ 'Album/a.txt': strToU8('a'), 'album/b.txt': strToU8('b') });
+  await assert.rejects(extractZip(conflicting, root, signal, options), /충돌/u);
+  assert.deepEqual(await fs.readdir(root), []);
+
+  const valid = zipSync({ 'Album/Empty/': new Uint8Array(), 'Album/a.txt': strToU8('a') });
+  await extractZip(valid, root, signal, options);
+  assert.deepEqual(await fs.readdir(path.join(root, 'Album', 'Empty')), []);
+  assert.equal(await fs.readFile(path.join(root, 'Album', 'a.txt'), 'utf8'), 'a');
+});

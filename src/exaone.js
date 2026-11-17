@@ -2,6 +2,7 @@
 
 const { Readable } = require('node:stream');
 const { createInterface } = require('node:readline');
+const { setTimeout: delay } = require('node:timers/promises');
 const { httpsFetch } = require('./transport');
 
 const reasoningEfforts = ['low', 'high', 'max'];
@@ -88,8 +89,36 @@ async function chat(connection, messages, effort, signal, onText, onRateLimit, {
   }
 }
 
+async function queuedChat(connect, messages, effort, signal, onText, onRateLimit, { retryAt = 0, onPhase }) {
+  async function waitUntil(deadline) {
+    if (deadline <= Date.now()) return;
+    onPhase('queued');
+    while (deadline > Date.now()) {
+      await delay(Math.min(deadline - Date.now(), 60 * 60 * 1000), undefined, { signal });
+    }
+  }
+
+  async function send() {
+    signal.throwIfAborted();
+    const connection = await connect();
+    signal.throwIfAborted();
+    onPhase('waiting');
+    return chat(connection, messages, effort, signal, onText, onRateLimit, { onPhase });
+  }
+
+  await waitUntil(retryAt);
+  try {
+    return await send();
+  } catch (error) {
+    if (error.code !== 'EXAONE_RATE_LIMIT') throw error;
+    await waitUntil(error.retryAt || Date.now() + 1100);
+    return send();
+  }
+}
+
 async function readChatResponse(response, signal, onText, onRateLimit, onPhase, usingRelay, refreshTimeout) {
-  onRateLimit(rateLimit(response));
+  const quota = rateLimit(response);
+  onRateLimit(quota);
   if (!response.ok || !response.body) {
     await response.body?.cancel();
     const messages = {
@@ -97,7 +126,12 @@ async function readChatResponse(response, signal, onText, onRateLimit, onPhase, 
       403: usingRelay ? 'EXAONE 중계 서버의 접속 권한을 확인하세요.' : 'EXAONE API 키의 사용 권한을 확인하세요.',
       429: 'EXAONE 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요.'
     };
-    throw new Error(messages[response.status] || 'EXAONE 응답을 받지 못했습니다. (HTTP ' + response.status + ')');
+    const error = new Error(messages[response.status] || 'EXAONE 응답을 받지 못했습니다. (HTTP ' + response.status + ')');
+    if (response.status === 429) {
+      error.code = 'EXAONE_RATE_LIMIT';
+      error.retryAt = quota.retryAt;
+    }
+    throw error;
   }
   if (!response.headers.get('content-type')?.includes('text/event-stream')) {
     await response.body.cancel();
@@ -160,4 +194,4 @@ async function summarizeTitle(connection, messages, signal, onRateLimit) {
   return Array.from(firstLine).slice(0, 45).join('');
 }
 
-module.exports = { chat, summarizeTitle, reasoningEfforts, relayEndpoint };
+module.exports = { chat, queuedChat, summarizeTitle, reasoningEfforts, relayEndpoint };

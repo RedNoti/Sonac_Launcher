@@ -107,3 +107,60 @@ test('DSM accepts a session ID starting like a number when carried in its id coo
   await nas.logout();
   assert.deepEqual(operations, ['list_share', 'download', 'upload', 'logout']);
 });
+
+test('DSM renames a file using the discovered File Station API version', async t => {
+  for (const version of [1, 2]) {
+    const fetch = t.mock.method(require('undici'), 'fetch', async (url, { body }) => {
+      const data = url.pathname === '/webapi/query.cgi' ? {
+        ...methods, 'SYNO.FileStation.Rename': { path: 'entry.cgi', minVersion: 1, maxVersion: version }
+      } : body.get('method') === 'login' ? { sid: 'fixture-sid' } :
+        body.get('method') === 'list_share' ? { shares: [], total: 0 } : {};
+      if (body?.get('method') === 'rename') {
+        assert.equal(body.get('api'), 'SYNO.FileStation.Rename');
+        assert.equal(body.get('version'), String(version));
+        assert.equal(body.get('path'), version === 1 ? '/Shared/a.zip' : '["/Shared/a.zip"]');
+        assert.equal(body.get('name'), version === 1 ? '새 이름.zip' : '["새 이름.zip"]');
+      }
+      return Response.json({ success: true, data });
+    });
+    const nas = storage(profile);
+    await nas.connect({ password: 'fixture-password' }, '', false);
+    await nas.rename('/Shared', { path: '/Shared/a.zip', directory: false }, '새 이름.zip');
+    assert.equal(fetch.mock.callCount(), 4);
+    fetch.mock.restore();
+  }
+});
+
+test('DSM starts and polls ZIP extraction without transferring the archive', async t => {
+  const operations = [];
+  t.mock.method(require('undici'), 'fetch', async (url, { body }) => {
+    if (url.pathname === '/webapi/query.cgi') {
+      assert.match(url.searchParams.get('query'), /SYNO\.FileStation\.Extract/u);
+      return Response.json({ success: true, data: {
+        ...methods, 'SYNO.FileStation.Extract': { path: 'entry.cgi', minVersion: 2, maxVersion: 2 }
+      } });
+    }
+    const method = body.get('method');
+    if (method === 'login') return Response.json({ success: true, data: { sid: 'fixture-sid' } });
+    if (method === 'list_share') return Response.json({ success: true, data: { shares: [], total: 0 } });
+    operations.push(method);
+    assert.equal(body.get('api'), 'SYNO.FileStation.Extract');
+    assert.equal(body.get('version'), '2');
+    if (method === 'start') {
+      assert.equal(JSON.parse(body.get('file_path')), '/web/대용량.zip');
+      assert.equal(JSON.parse(body.get('dest_folder_path')), '/web/staging');
+      assert.equal(body.get('keep_dir'), 'true');
+      assert.equal(body.get('create_subfolder'), 'false');
+      assert.equal(body.get('overwrite'), 'false');
+      return Response.json({ success: true, data: { taskid: 'FileStation_extract123' } });
+    }
+    assert.equal(JSON.parse(body.get('taskid')), 'FileStation_extract123');
+    return Response.json({ success: true, data: method === 'status' ? { finished: false, progress: 0.45 } : {} });
+  });
+  const nas = storage(profile);
+  await nas.connect({ password: 'fixture-password' }, '', false);
+  const task = await nas.startExtract('/web/대용량.zip', '/web/staging');
+  assert.deepEqual(await nas.extractStatus(task), { finished: false, progress: 0.45 });
+  await nas.stopExtract(task);
+  assert.deepEqual(operations, ['start', 'status', 'stop']);
+});

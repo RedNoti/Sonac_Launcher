@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import asar from '@electron/asar';
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
-import { writeExecutableIcon, writeMsiSource, writeShortcutProperties } from './windows-msi.mjs';
+import { writeExecutableIcon, writeMsiSource, writeShortcutProperties, writeUninstallAction } from './windows-msi.mjs';
 import { macSigningConfiguration, signMacBundle, notarizeMacImage } from './mac-sign.mjs';
 
 const require = createRequire(import.meta.url);
@@ -113,7 +113,9 @@ async function applicationArchive(key, updateRepository) {
   await fs.cp(path.join(root, 'src'), path.join(source, 'src'), { recursive: true });
   await fs.rm(path.join(source, 'src', 'ui', 'app.ico'));
   for (const name of ['saxes', 'xmlchars', 'undici', '@firebase/app', '@firebase/auth',
-    '@firebase/component', '@firebase/logger', '@firebase/util', 'idb', 'tslib']) {
+    '@firebase/component', '@firebase/logger', '@firebase/util', 'idb', 'tslib',
+    'music-metadata', '@borewit/text-codec', '@tokenizer/token', '@tokenizer/inflate', 'content-type',
+    'cfb', 'adler-32', 'crc-32', 'debug', 'ms', 'file-type', 'strtok3', 'token-types', 'ieee754', 'uint8array-extras', 'media-typer', 'win-guid']) {
     await fs.cp(path.join(root, 'node_modules', name), path.join(source, 'node_modules', name), { recursive: true });
   }
   const vendor = path.join(source, 'node_modules');
@@ -240,7 +242,10 @@ async function packageWindows(extracted, archive, output) {
   command(process.env.WIXL || 'wixl', ['-a', 'x64', '-o', output, source], { cwd: extracted });
   const shortcutProperties = path.join(work, 'MsiShortcutProperty.idt');
   await writeShortcutProperties(shortcutProperties, appId);
-  command(process.env.MSIBUILD || 'msibuild', [output, '-i', shortcutProperties]);
+  // wixl schedules the action but cannot emit a directory-based executable action.
+  const uninstallAction = path.join(work, 'CustomAction.idt');
+  await writeUninstallAction(uninstallAction);
+  command(process.env.MSIBUILD || 'msibuild', [output, '-i', shortcutProperties, '-i', uninstallAction]);
 }
 
 async function retainLatestInstaller() {

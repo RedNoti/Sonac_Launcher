@@ -91,8 +91,12 @@ async function downloadAsset(asset, signal, token = process.env.SONAC_RELEASE_GI
   throw new Error('GitHub 릴리스 다운로드 주소를 확인할 수 없습니다.');
 }
 
-async function extractZip(bytes, directory, signal) {
+async function extractZip(bytes, directory, signal, {
+  limit = extractedLimit, entryLimit = 20000, validatePart, preserveDirectories = false
+} = {}) {
   const paths = new Set();
+  const directories = [];
+  const tree = new Map();
   let bytesExpected = 0;
   const files = unzipSync(bytes, { filter({ name, size, originalSize, compression }) {
     const parts = name.replace(/\/$/u, '').split('/');
@@ -101,14 +105,36 @@ async function extractZip(bytes, directory, signal) {
         /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(part) || part === '__proto__')) {
       throw new Error('ZIP에 사용할 수 없는 파일 경로가 있습니다.');
     }
+    if (validatePart) parts.forEach(validatePart);
     const key = parts.join('/').normalize('NFC').toLowerCase();
     if (paths.has(key)) throw new Error('ZIP에 중복된 파일 경로가 있습니다.');
     paths.add(key);
+    const directoryEntry = name.endsWith('/');
+    if (preserveDirectories) {
+      if (parts.length > 50) throw new Error('ZIP의 폴더 구조가 너무 깊습니다.');
+      for (let depth = 1; depth <= parts.length; depth++) {
+        const fullPath = parts.slice(0, depth).join('/');
+        const folded = fullPath.normalize('NFC').toLowerCase();
+        const isDirectory = depth < parts.length || directoryEntry;
+        const previous = tree.get(folded);
+        if (previous && (previous.fullPath !== fullPath || previous.isDirectory !== isDirectory)) {
+          throw new Error('ZIP에 서로 충돌하는 파일 또는 폴더 경로가 있습니다.');
+        }
+        tree.set(folded, { fullPath, isDirectory });
+        if (tree.size > entryLimit) throw new Error('ZIP에 압축을 풀 항목이 너무 많습니다.');
+      }
+    }
     bytesExpected += compression === 0 ? size : originalSize;
-    if (paths.size > 20000 || bytesExpected > extractedLimit) throw new Error('ZIP 압축 해제 크기 한도를 초과했습니다.');
-    return !name.endsWith('/');
+    if (paths.size > entryLimit || bytesExpected > limit) throw new Error('ZIP 압축 해제 크기 한도를 초과했습니다.');
+    if (!directoryEntry) return true;
+    if (preserveDirectories) directories.push(parts);
+    return false;
   } });
-  if (!Object.keys(files).length) throw new Error('ZIP에 배포 파일이 없습니다.');
+  if (!Object.keys(files).length && !directories.length) throw new Error('ZIP에 압축을 풀 항목이 없습니다.');
+  for (const parts of directories) {
+    signal.throwIfAborted();
+    await fs.mkdir(path.join(directory, ...parts), { recursive: true });
+  }
   for (const [name, data] of Object.entries(files)) {
     signal.throwIfAborted();
     const target = path.join(directory, ...name.split('/'));

@@ -20,7 +20,9 @@ const APIS = {
   download: 'SYNO.FileStation.Download',
   upload: 'SYNO.FileStation.Upload',
   mkdir: 'SYNO.FileStation.CreateFolder',
-  delete: 'SYNO.FileStation.Delete'
+  delete: 'SYNO.FileStation.Delete',
+  rename: 'SYNO.FileStation.Rename',
+  extract: 'SYNO.FileStation.Extract'
 };
 const DSM_ERRORS = {
   105: '이 계정에는 File Station 사용 권한이 없습니다.',
@@ -228,15 +230,17 @@ class Synology {
       api: 'SYNO.API.Info', version: '1', method: 'query', query: Object.values(APIS).join(',')
     });
     const info = await dsmJSON(await request(infoURL, { dispatcher: this.dispatcher }, signal), 'DSM API 조회');
-    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2, mkdir: 2 };
+    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2, mkdir: 2, rename: 2, extract: 2 };
     delete this.methods.delete;
     delete this.methods.mkdir;
+    delete this.methods.rename;
+    delete this.methods.extract;
     for (const [type, api] of Object.entries(APIS)) {
       const entry = info?.[api];
       const version = Math.max(Number(entry?.minVersion), Math.min(supported[type], Number(entry?.maxVersion)));
       if (!/^(?:[\w-]+\/)*[\w.-]+\.cgi$/u.test(entry?.path || '') || !Number.isInteger(version) ||
-          version > Number(entry.maxVersion) || (type !== 'auth' && version < 2)) {
-        if (type === 'delete' || type === 'mkdir') continue;
+          version > Number(entry.maxVersion) || (!['auth', 'rename'].includes(type) && version < 2)) {
+        if (['delete', 'mkdir', 'rename', 'extract'].includes(type)) continue;
         throw new Error('DSM File Station API를 찾을 수 없습니다. NAS에서 File Station 패키지 상태를 확인하세요.');
       }
       this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, origin) };
@@ -357,6 +361,39 @@ class Synology {
     await dsmJSON(await this.post('mkdir', 'create', {
       folder_path: JSON.stringify([remotePath(folder)]), name: JSON.stringify([name])
     }, signal));
+  }
+
+  async rename(folder, entry, name, signal) {
+    if (!this.methods.rename) throw new Error('이 NAS에서 이름 바꾸기를 사용할 수 없습니다.');
+    childPath(folder, name);
+    const field = value => this.methods.rename.version === '2' ? JSON.stringify([value]) : value;
+    await dsmJSON(await this.post('rename', 'rename', {
+      path: field(remotePath(entry.path)), name: field(name)
+    }, signal));
+  }
+
+  async startExtract(archive, folder, signal) {
+    if (!this.methods.extract) throw new Error('이 NAS에서 File Station 압축 풀기 API를 사용할 수 없습니다.');
+    const data = await dsmJSON(await this.post('extract', 'start', {
+      file_path: JSON.stringify(remotePath(archive)),
+      dest_folder_path: JSON.stringify(remotePath(folder)),
+      keep_dir: 'true', create_subfolder: 'false', overwrite: 'false'
+    }, signal));
+    const task = data?.taskid ?? data?.task_id;
+    if (typeof task !== 'string' || !task || task.length > 256) {
+      throw new Error('DSM 압축 풀기 작업 ID를 확인할 수 없습니다.');
+    }
+    return task;
+  }
+
+  async extractStatus(task, signal) {
+    const data = await dsmJSON(await this.post('extract', 'status', { taskid: JSON.stringify(task) }, signal));
+    if (typeof data?.finished !== 'boolean') throw new Error('DSM 압축 풀기 상태를 확인할 수 없습니다.');
+    return data;
+  }
+
+  async stopExtract(task, signal) {
+    await dsmJSON(await this.post('extract', 'stop', { taskid: JSON.stringify(task) }, signal));
   }
 
   async delete(entry, signal) {
@@ -490,13 +527,36 @@ class WebDAV {
     return this.send(this.url(path), { method: 'GET' }, signal, 3600000);
   }
 
-  async upload(folder, name, content, { overwrite = false, signal } = {}) {
+  async upload(folder, name, content, { overwrite = false, signal, progress } = {}) {
     const headers = { 'Content-Type': 'application/octet-stream', 'Content-Length': String(content.size) };
     if (!overwrite) headers['If-None-Match'] = '*';
+    async function* trackUpload() {
+      let sent = 0;
+      progress(name, sent, content.size);
+      for await (const chunk of content.stream()) {
+        yield chunk;
+        sent += chunk.length;
+        progress(name, sent, content.size);
+      }
+    }
     const response = await this.send(this.url(childPath(folder, name)), {
-      method: 'PUT', body: content, headers
+      method: 'PUT', body: progress ? trackUpload() : content, duplex: 'half', headers
     }, signal, 3600000);
     await response.body?.cancel();
+  }
+
+  async mkdir(folder, name, signal) {
+    const response = await this.send(this.url(childPath(folder, name), true), { method: 'MKCOL' }, signal);
+    await response.body?.cancel();
+  }
+
+  async rename(folder, entry, name, signal) {
+    const response = await this.send(this.url(entry.path, entry.directory), {
+      method: 'MOVE',
+      headers: { Destination: this.url(childPath(folder, name), entry.directory).href, Overwrite: 'F' }
+    }, signal);
+    await response.body?.cancel();
+    if (response.status === 207) throw new Error('저장소에서 일부 항목의 이름을 바꾸지 못했습니다.');
   }
 
   async delete(entry, signal) {

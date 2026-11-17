@@ -3,9 +3,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const methods = ['state', 'setUsageMode', 'setPreference', 'login', 'logout', 'switchNas', 'list', 'listLocal', 'chooseLocal', 'settings', 'sync', 'syncAll',
-  'layout', 'upload', 'download', 'delete', 'mkdir', 'preview', 'closePreview', 'checkUpdate', 'installUpdate', 'openLink',
-  'terminal', 'remoteWrites', 'serverUpdaterLogin', 'serverUpdaterLogout', 'serverUpdaterRestore',
-  'serverFileAdd', 'serverFileRemove', 'serverFileOpen', 'serverMonitorSettings', 'serverMonitorTarget', 'aiHistory', 'aiChat', 'aiTitle', 'aiCancel',
+  'layout', 'upload', 'download', 'delete', 'mkdir', 'renameFile', 'extractArchive', 'preview', 'mediaFolder', 'mediaPlay', 'mediaCompatible', 'mediaSubtitle', 'closePreview', 'checkUpdate', 'installUpdate', 'openLink',
+  'uninstallMac', 'terminal', 'remoteWrites', 'serverUpdaterLogin', 'serverUpdaterLogout', 'serverUpdaterRestore',
+  'serverFileAdd', 'serverFileRemove', 'serverFileOpen', 'serverMonitorSettings', 'serverMonitorTarget', 'serverMonitorCheck', 'aiHistory', 'aiPickFiles', 'aiChat', 'aiTitle', 'aiCancel',
   'serverAssets', 'serverDeploy', 'serverRun', 'serverStop', 'serverLogs', 'serverDeploymentFolder', 'serverDataFolder',
   'serverGitHubConnect', 'serverGitHubDisconnect', 'serverGitHubRepos',
   'githubConnect', 'githubDisconnect', 'githubRepos', 'githubCommit', 'githubTrack',

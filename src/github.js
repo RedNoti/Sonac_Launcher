@@ -59,6 +59,11 @@ async function repositories(token, signal) {
   }
 }
 
+async function requireRepositoryAccess(repository, token, signal) {
+  const response = await checked(await request(repositoryPath(repository), token, signal));
+  await response.body?.cancel();
+}
+
 async function latestCommit(repository, branch, token, signal) {
   const query = branch ? '?sha=' + encodeURIComponent(branch) : '';
   const data = await (await checked(await request(repositoryPath(repository) + '/commits' + query +
@@ -83,4 +88,4 @@ async function archive(repository, sha, token, signal) {
   return checked(await httpsFetch(url, { redirect: 'error', signal }));
 }
 
-module.exports = { repositoryPath, identity, repositories, latestCommit, archive };
+module.exports = { repositoryPath, identity, repositories, requireRepositoryAccess, latestCommit, archive };
