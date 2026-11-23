@@ -160,8 +160,11 @@
   </main>
 
   <main id="ai-home" class="ai-home" aria-labelledby="ai-title" hidden>
-    <aside class="ai-sidebar" aria-label="대화 목록">
-      <button id="ai-new-chat" type="button">+ 새 대화</button>
+    <aside id="ai-sidebar" class="ai-sidebar" aria-label="대화 목록">
+      <button id="ai-new-chat" type="button"><span id="ai-new-icon" aria-hidden="true"></span>새 채팅</button>
+      <label class="ai-search"><span id="ai-search-icon" aria-hidden="true"></span>
+        <input id="ai-search" type="search" autocomplete="off" placeholder="채팅 검색" aria-label="채팅 검색">
+      </label>
       <div id="ai-chat-list"></div>
       <details id="ai-usage" class="ai-usage">
         <summary id="ai-usage-toggle" title="EXAONE 사용량">
@@ -190,37 +193,55 @@
     </aside>
     <section class="ai-conversation">
       <header class="ai-header">
-        <div>
-          <h1 id="ai-title" tabindex="-1">AI 채팅</h1>
-          <p class="work-meta">K-EXAONE 2.5</p>
-        </div>
-        <div class="ai-header-actions">
-          <label for="ai-effort">추론 강도</label>
-          <select id="ai-effort">
-            <option value="low">낮음</option>
-            <option value="high">높음</option>
-            <option value="max" selected>최대</option>
-          </select>
-          <button id="ai-back" type="button">← 홈</button>
-        </div>
+        <button id="ai-sidebar-toggle" aria-controls="ai-sidebar" type="button" aria-label="대화 목록 접기" aria-expanded="true"></button>
+        <h1 id="ai-title" tabindex="-1">AI 채팅</h1>
+        <button id="ai-back" type="button">← 홈</button>
       </header>
       <div id="ai-messages" class="ai-messages" role="log" aria-label="채팅 메시지" aria-live="off"></div>
       <form id="ai-form" class="ai-form">
+        <div id="ai-welcome" class="ai-welcome" hidden>
+          <span id="ai-welcome-icon" aria-hidden="true"></span>
+          <h2>무엇을 도와드릴까요?</h2>
+          <p>K-EXAONE 2.5와 대화해 보세요</p>
+        </div>
         <p id="ai-error" class="error" role="alert" hidden></p>
         <div id="ai-progress" class="ai-progress work-meta" hidden>
           <span id="ai-status" role="status"></span>
           <span id="ai-elapsed" aria-hidden="true" hidden></span>
         </div>
-        <div id="ai-attachments" class="ai-attachments" aria-label="첨부 파일" hidden></div>
         <div class="ai-compose">
+          <div id="ai-attachments" class="ai-attachments" aria-label="첨부 파일" hidden></div>
           <button id="ai-attach" type="button" aria-label="문서 또는 코드 첨부" title="문서 또는 코드 첨부"></button>
           <textarea name="message" aria-label="메시지" placeholder="메시지를 입력하세요" rows="1" maxlength="12000"></textarea>
-          <button id="ai-send" class="primary" type="submit" aria-label="보내기" title="보내기" disabled></button>
-          <button id="ai-stop" type="button" aria-label="응답 중지" title="응답 중지" hidden></button>
+          <div class="ai-compose-actions">
+            <select id="ai-effort" aria-label="K-EXAONE 2.5 추론 강도" title="추론 강도">
+              <option value="low">낮음</option>
+              <option value="high">높음</option>
+              <option value="max" selected>최대</option>
+            </select>
+            <button id="ai-send" class="primary" type="submit" aria-label="보내기" title="보내기" disabled></button>
+            <button id="ai-stop" type="button" aria-label="응답 중지" title="응답 중지" hidden></button>
+          </div>
+        </div>
+        <div id="ai-suggestions" class="ai-suggestions" hidden>
+          <button type="button">문서 요약하기</button>
+          <button type="button">코드 설명하기</button>
+          <button type="button">글 다듬기</button>
         </div>
       </form>
+      <div class="ai-drop-overlay" aria-hidden="true">파일을 여기에 놓아 첨부하세요</div>
     </section>
   </main>
+
+  <dialog id="ai-manage-dialog" aria-labelledby="ai-manage-title">
+    <header class="dialog-header"><h2 id="ai-manage-title"></h2><button class="close" data-close="ai-manage-dialog" type="button" aria-label="닫기">×</button></header>
+    <form id="ai-manage-form">
+      <label id="ai-manage-name">대화 이름<input name="title" maxlength="80"></label>
+      <p id="ai-manage-confirm" class="work-meta" hidden></p>
+      <p id="ai-manage-error" class="notice bad" role="alert" hidden></p>
+      <footer class="dialog-actions"><button id="ai-manage-submit" type="submit">저장</button></footer>
+    </form>
+  </dialog>
 
   <main id="server-home" class="home server-dashboard" aria-labelledby="server-home-title" hidden>
     <header class="work-heading server-dashboard-header">
@@ -229,7 +250,7 @@
         <p id="server-home-account" class="work-meta"></p>
       </div>
       <div class="work-actions">
-        <button id="server-monitor-toggle" type="button" class="server-icon-button" title="서버 모니터링" aria-label="서버 모니터링" aria-controls="server-monitor-controls" aria-expanded="false" hidden></button>
+        <button id="server-monitor-toggle" type="button" class="server-icon-button" title="서버 모니터링" aria-label="서버 모니터링" aria-controls="server-monitoring" hidden></button>
         <button id="server-home-back" type="button">← 시작 화면</button>
         <button id="server-settings" type="button">설정</button>
         <button id="server-home-logout" type="button">로그아웃</button>
@@ -266,45 +287,58 @@
       <div id="server-file-list" class="work-list"></div>
     </section>
     <section id="server-monitoring" class="work-section" aria-labelledby="server-monitor-title">
-      <div class="work-heading">
-        <h2 id="server-monitor-title">운영 중인 웹페이지</h2>
+      <header class="work-heading server-monitor-heading">
+        <div><h2 id="server-monitor-title">운영 중인 웹페이지</h2>
+          <p id="server-monitor-summary" class="work-meta"></p></div>
         <div class="work-actions">
           <div class="server-view-switch" role="group" aria-label="웹페이지 표시 방식">
-            <button id="server-sites-list" type="button" aria-pressed="true">목록</button>
-            <button id="server-sites-grid" type="button" aria-pressed="false">격자</button>
+            <i aria-hidden="true"></i>
+            <button id="server-sites-grid" type="button" aria-pressed="true">격자</button>
+            <button id="server-sites-list" type="button" aria-pressed="false">목록</button>
           </div>
           <button id="server-monitor-check" type="button">전체 확인</button>
+          <button id="server-monitor-register" class="primary" type="button" aria-controls="server-monitor-add" aria-expanded="false">서비스 등록</button>
+          <button id="server-monitor-options-button" class="server-icon-button" type="button" aria-controls="server-monitor-controls"
+            aria-expanded="false" aria-label="모니터링 설정" title="모니터링 설정"></button>
+        </div>
+        <div id="server-monitor-controls" class="server-monitor-popover" hidden>
+          <form id="server-monitor-settings" autocomplete="off">
+            <label class="setting-option"><span>모니터링 <small>등록한 서비스를 주기적으로 점검합니다.</small></span>
+              <input class="setting-switch" name="enabled" type="checkbox" role="switch"></label>
+            <label class="setting-option"><span>일일 보고 전송 <small>Discord로 일일 보고를 보냅니다.</small></span>
+              <input class="setting-switch" name="deliveryEnabled" type="checkbox" role="switch"></label>
+            <div class="server-report-time-label">보고 시각 <small>한국 시간</small></div>
+            <div id="server-monitor-times" class="server-monitor-times" role="group" aria-label="보고 시각">
+              <button type="button" data-time="08:00" aria-pressed="false">오전 8:00</button>
+              <button type="button" data-time="09:00" aria-pressed="true">오전 9:00</button>
+              <button type="button" data-time="10:00" aria-pressed="false">오전 10:00</button>
+            </div>
+            <details class="server-monitor-advanced"><summary>직접 설정 · Discord 연결</summary>
+            <label>보고 시각 (한국 시간)<input name="time" type="time" required value="09:00"></label>
+            <label>Discord 웹후크<input name="webhook" type="password" maxlength="511" placeholder="선택 사항" autocomplete="off"></label>
+            <label id="server-monitor-remove-webhook" class="check" hidden><input name="removeWebhook" type="checkbox">저장된 웹후크 삭제</label>
+            <button type="submit" class="primary">저장</button>
+            </details>
+          </form>
+        </div>
+      </header>
+      <div id="server-monitor-add" class="server-register-collapse" hidden inert>
+        <div>
+        <form id="server-monitor-target" class="work-card">
+          <input name="name" aria-label="서비스 이름" placeholder="서비스 이름" maxlength="48" required>
+          <input name="url" aria-label="상태 확인 주소" type="url" placeholder="https://example.com/health" maxlength="2048" required>
+          <button type="submit" class="primary">추가</button>
+          <button id="server-monitor-cancel" type="button">취소</button>
+        </form>
         </div>
       </div>
-      <p id="server-monitor-summary" class="work-meta"></p>
-      <div id="server-monitor-targets" class="server-monitor-grid"></div>
-      <div id="server-monitor-controls" hidden>
-      <details id="server-monitor-add" class="server-disclosure">
-      <summary>+ 서비스 등록</summary>
-      <form id="server-monitor-target" class="work-card">
-        <label>보고서에 표시할 서비스 이름<input name="name" maxlength="48" required></label>
-        <label>상태 확인 주소<input name="url" type="url" placeholder="http://127.0.0.1:8787/health" maxlength="2048" required></label>
-        <div class="work-actions"><button type="submit">서비스 추가</button></div>
-      </form>
-      </details>
-      <details id="server-monitor-options" class="server-disclosure">
-      <summary>모니터링 및 일일 보고 설정</summary>
-      <form id="server-monitor-settings" class="work-card" autocomplete="off">
-        <label class="setting-option"><span>모니터링 시작 <small>서버 업데이터에 로그인한 동안 1분 간격으로 확인합니다.</small></span>
-          <input class="setting-switch" name="enabled" type="checkbox" role="switch"></label>
-        <label>일일 보고 시각 (한국 시간)<input name="time" type="time" required value="09:00"></label>
-        <label>Discord 웹후크<input name="webhook" type="password" maxlength="511" placeholder="선택 사항" autocomplete="off"></label>
-        <label id="server-monitor-remove-webhook" class="check" hidden><input name="removeWebhook" type="checkbox">저장된 웹후크 삭제</label>
-        <div class="work-actions"><button type="submit" class="primary">모니터링 설정 저장</button></div>
-      </form>
-      </details>
-      <article id="server-monitor-report" class="work-card" hidden>
-        <h3 id="server-monitor-report-title"></h3>
-        <p id="server-monitor-report-info" class="work-meta"></p>
-        <p id="server-monitor-report-text" class="server-monitor-report-text"></p>
-      </article>
-      </div>
       <p id="server-monitor-error" class="notice bad" role="alert" hidden></p>
+      <div id="server-monitor-targets" class="server-monitor-grid as-grid"></div>
+    </section>
+    <section id="server-monitor-report" class="work-section server-report-section" aria-labelledby="server-report-heading">
+      <h2 id="server-report-heading">서버 일일 보고</h2>
+      <p id="server-report-schedule" class="work-meta"></p>
+      <div id="server-report-list"></div>
     </section>
     <dialog id="server-github-dialog" aria-labelledby="server-github-title">
       <header class="dialog-header">
@@ -338,66 +372,71 @@
     </section>
   </main>
 
-  <main id="home" class="home" hidden>
-    <header class="page-header">
-      <div class="home-brand">
-        <img src="brand-dark.png" width="32" height="32" alt="">
-        <h1>SONAC LAUNCHER</h1>
+  <div id="home-shell" class="home-shell">
+    <main id="home" class="home" hidden>
+      <div class="home-content">
+        <header class="page-header">
+          <div class="home-brand">
+            <img src="brand-dark.png" width="32" height="32" alt="">
+            <h1>SONAC LAUNCHER</h1>
+          </div>
+          <div class="header-actions">
+            <div id="sync-indicator" class="chip"><span id="sync-dot" class="dot"></span><span id="sync-status" role="status"></span></div>
+            <button id="sync-now" class="account-button" title="모두 동기화" aria-label="모두 동기화"></button>
+            <button id="update-now" class="account-button" title="업데이트 다운로드" aria-label="업데이트 다운로드" hidden></button>
+            <button id="edit-button" class="account-button" title="런처 편집" aria-label="런처 편집"></button>
+            <button id="music-toggle" class="account-button" type="button" aria-label="음악 플레이어 열기"
+              aria-controls="music-panel" aria-expanded="false" title="음악 플레이어 열기"></button>
+            <button id="account-button" class="account-button" title="설정" aria-label="설정"></button>
+          </div>
+        </header>
+        <div id="groups" class="groups"></div>
+        <section id="home-sync" class="work-section" aria-labelledby="areas-title">
+          <header class="work-heading">
+            <h2 id="areas-title">동기화 파일</h2>
+            <button id="area-add" class="account-button primary" aria-label="영역 추가" title="영역 추가"></button>
+          </header>
+          <p id="areas-empty" class="work-empty" hidden>영역을 만들고 동기화할 폴더를 추가하세요.</p>
+          <div id="area-list" class="sync-grid"></div>
+        </section>
       </div>
-      <div class="header-actions">
-        <div id="sync-indicator" class="chip"><span id="sync-dot" class="dot"></span><span id="sync-status" role="status"></span></div>
-        <button id="sync-now" class="account-button" title="모두 동기화" aria-label="모두 동기화"></button>
-        <button id="update-now" class="account-button" title="업데이트 다운로드" aria-label="업데이트 다운로드" hidden></button>
-        <button id="edit-button" class="account-button" title="런처 편집" aria-label="런처 편집"></button>
-        <button id="music-toggle" class="account-button" type="button" aria-label="음악 플레이어 열기"
-          aria-controls="music-panel" aria-expanded="false" title="음악 플레이어 열기"></button>
-        <button id="account-button" class="account-button" title="설정" aria-label="설정"></button>
-      </div>
-    </header>
-    <div id="groups" class="groups"></div>
-    <section id="home-sync" class="work-section" aria-labelledby="areas-title">
-      <header class="work-heading">
-        <h2 id="areas-title">동기화 파일</h2>
-        <button id="area-add" class="account-button primary" aria-label="영역 추가" title="영역 추가"></button>
-      </header>
-      <p id="areas-empty" class="work-empty" hidden>영역을 만들고 동기화할 폴더를 추가하세요.</p>
-      <div id="area-list" class="sync-grid"></div>
-    </section>
-  </main>
+    </main>
 
-  <aside id="music-panel" class="music-panel" aria-labelledby="music-title" inert>
-    <header class="work-heading">
-      <h2 id="music-title" tabindex="-1">음악 플레이어</h2>
-      <button id="music-hide" class="account-button" type="button" aria-label="음악 플레이어 접기" title="음악 플레이어 접기"></button>
-    </header>
-    <div class="media-folder-row">
-      <p id="audio-folder" class="work-meta"></p>
+    <aside id="music-panel" class="music-panel" aria-labelledby="music-title" inert>
+      <div class="music-panel-content">
+        <header class="work-heading">
+          <h2 id="music-title" tabindex="-1">음악 플레이어</h2>
+        </header>
+        <div class="media-folder-row">
+          <p id="audio-folder" class="work-meta"></p>
 
-    </div>
-    <div class="music-current">
-      <div id="music-art" class="music-art" aria-hidden="true">
-        <img id="music-cover" alt="" hidden>
+        </div>
+        <div class="music-current">
+          <div id="music-art" class="music-art" aria-hidden="true">
+            <img id="music-cover" alt="" hidden>
+          </div>
+          <div class="music-meta">
+            <strong id="audio-current">곡을 선택하세요</strong>
+            <span id="music-track-detail" class="work-meta">재생할 곡을 골라 주세요</span>
+          </div>
+          <div class="music-progress">
+            <input id="music-seek" type="range" min="0" max="1" value="0" step="0.1" aria-label="재생 위치" disabled>
+            <div><span id="music-elapsed">0:00</span><span id="music-duration">0:00</span></div>
+          </div>
+          <div class="music-controls">
+            <button id="audio-prev" class="account-button" type="button" aria-label="이전 곡" title="이전 곡" disabled></button>
+            <button id="music-play" class="account-button primary" type="button" aria-label="재생" title="재생" disabled></button>
+            <button id="audio-next" class="account-button" type="button" aria-label="다음 곡" title="다음 곡" disabled></button>
+          </div>
+          <label class="player-volume">볼륨 <input id="music-volume" type="range" min="0" max="100" step="1" value="100"></label>
+          <audio id="audio-playback" preload="auto" hidden></audio>
+          <audio id="audio-preload" preload="auto" hidden></audio>
+        </div>
+        <p id="audio-status" class="notice" role="status" hidden></p>
+        <div id="audio-list" class="music-library" aria-label="앨범 및 재생 목록"></div>
       </div>
-      <div class="music-meta">
-        <strong id="audio-current">곡을 선택하세요</strong>
-        <span id="music-track-detail" class="work-meta">재생할 곡을 골라 주세요</span>
-      </div>
-      <div class="music-progress">
-        <input id="music-seek" type="range" min="0" max="1" value="0" step="0.1" aria-label="재생 위치" disabled>
-        <div><span id="music-elapsed">0:00</span><span id="music-duration">0:00</span></div>
-      </div>
-      <div class="music-controls">
-        <button id="audio-prev" class="account-button" type="button" aria-label="이전 곡" title="이전 곡" disabled></button>
-        <button id="music-play" class="account-button primary" type="button" aria-label="재생" title="재생" disabled></button>
-        <button id="audio-next" class="account-button" type="button" aria-label="다음 곡" title="다음 곡" disabled></button>
-      </div>
-      <label class="player-volume">볼륨 <input id="music-volume" type="range" min="0" max="100" step="1" value="100"></label>
-      <audio id="audio-playback" preload="auto" hidden></audio>
-      <audio id="audio-preload" preload="auto" hidden></audio>
-    </div>
-    <p id="audio-status" class="notice" role="status" hidden></p>
-    <div id="audio-list" class="music-library" aria-label="앨범 및 재생 목록"></div>
-  </aside>
+    </aside>
+  </div>
 
   <main id="video-page" class="home video-page" aria-labelledby="video-title" hidden>
     <header class="work-heading">
@@ -506,6 +545,14 @@
       </section>
       <section id="settings-sync" class="settings-section" aria-labelledby="settings-sync-title" hidden>
         <h2 id="settings-sync-title" tabindex="-1">백업 · 동기화</h2>
+        <section class="settings-sync-areas" aria-labelledby="settings-sync-areas-title">
+          <header class="work-heading">
+            <h3 id="settings-sync-areas-title">동기화 파일</h3>
+            <button id="settings-area-add" class="account-button primary" type="button" aria-label="영역 추가" title="영역 추가"></button>
+          </header>
+          <p id="settings-areas-empty" class="work-empty" hidden>등록한 동기화 항목이 없습니다.</p>
+          <div id="settings-area-list" class="sync-grid"></div>
+        </section>
         <div class="settings-group">
           <label class="setting-option">
             <span>자동 동기화 <small>아래에 지정한 NAS 폴더를 주기적으로 확인합니다.</small></span>
@@ -592,15 +639,23 @@
         <button class="primary" id="pick-button" hidden>이 폴더 선택</button>
       </div>
       <div id="selection-bar" class="selection-bar" role="group" aria-label="선택 항목 작업" hidden>
-        <span id="selection-count" role="status"></span>
-        <button id="mkdir-button" class="icon-button" aria-label="새 폴더" data-glyph="folderAdd"></button>
-        <button id="open-selection" class="icon-button" aria-label="미리보기" title="미리보기" data-glyph="eye"></button>
-        <button id="favorite-selection" class="icon-button" aria-label="즐겨찾기 추가" data-glyph="star" hidden></button>
-        <button id="download-selection" class="icon-button" aria-label="다운로드" title="다운로드" data-glyph="downloads"></button>
-        <button id="rename-selection" class="icon-button" aria-label="이름 바꾸기" title="이름 바꾸기" data-glyph="pencil" hidden></button>
-        <button id="extract-selection" class="icon-button" aria-label="ZIP 압축 풀기" title="ZIP 압축 풀기" data-glyph="extract" hidden></button>
-        <button id="delete-selection" class="icon-button danger" aria-label="삭제" title="삭제" data-glyph="trash"></button>
-        <button id="clear-selection" class="icon-button" aria-label="전체 선택" data-glyph="clear"></button>
+        <span id="selection-count" class="selection-count" role="status"><b id="selection-number">0</b>개 선택</span>
+        <div class="selection-group">
+          <button id="mkdir-button" class="icon-button" aria-label="새 폴더" data-glyph="fsNew"></button>
+        </div>
+        <div class="selection-group">
+          <button id="open-selection" class="icon-button" aria-label="미리보기" data-glyph="fsEye"></button>
+          <button id="favorite-selection" class="icon-button" aria-label="즐겨찾기 추가" data-glyph="fsStar" hidden></button>
+        </div>
+        <div class="selection-group">
+          <button id="download-selection" class="icon-button" aria-label="다운로드" data-glyph="fsDownload"></button>
+          <button id="rename-selection" class="icon-button" aria-label="이름 바꾸기" data-glyph="fsRename" hidden></button>
+          <button id="extract-selection" class="icon-button" aria-label="ZIP 압축 풀기" data-glyph="fsExtract" hidden></button>
+        </div>
+        <div class="selection-group">
+          <button id="delete-selection" class="icon-button danger" aria-label="삭제" data-glyph="fsDelete"></button>
+        </div>
+        <button id="clear-selection" class="icon-button" aria-label="전체 선택" data-glyph="fsAll"></button>
       </div>
       <p class="notice" id="browser-status" role="status" hidden></p>
       <div id="browser-results" class="table-scroll">
@@ -615,6 +670,7 @@
     </section>
   </main>
 
+  <div id="file-toolbar-tip" class="file-toolbar-tip" role="tooltip" hidden></div>
   <div id="file-actions-menu" class="file-actions-menu" role="menu" aria-label="선택 항목 작업" hidden></div>
 
   <dialog id="mkdir-dialog" aria-labelledby="mkdir-title">
@@ -757,32 +813,37 @@
   <div id="update-bar" class="update-bar" hidden>
     <div id="update-message" role="status"></div>
   </div>
-  <section id="update-now-bar" class="update-now-bar" aria-label="런처 업데이트" hidden>
-    <div id="update-download-face" class="update-now-face" inert>
-      <span id="update-mark" class="update-mark" aria-hidden="true"></span>
-      <div class="update-now-text">
-        <p id="update-download-message" role="status"></p>
-        <div id="update-progress" class="update-progress" role="progressbar" aria-label="업데이트 다운로드 진행률"
-          aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
-      </div>
-      <span id="update-percent" class="update-percent" aria-hidden="true"></span>
+  <section id="update-now-bar" class="now-notice" aria-label="런처 업데이트" hidden>
+    <div id="update-notice-detail" class="now-detail" inert>
+      <div class="now-detail-heading"><strong>런처 업데이트</strong></div>
+      <div class="now-detail-line"><strong id="update-download-message"></strong><span id="update-detail-percent"></span></div>
+      <div id="update-progress" class="update-progress" role="progressbar" aria-label="업데이트 다운로드 진행률" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+      <p id="update-ready-message" class="now-detail-note"></p>
     </div>
-    <div id="update-ready-face" class="update-now-face" inert>
-      <span id="update-ready-mark" class="update-mark" aria-hidden="true"></span>
-      <p id="update-ready-message" class="update-now-text" role="status"></p>
-      <button id="update-restart" class="primary" type="button">다시 시작하기</button>
+    <div class="now-row">
+      <button id="update-notice-toggle" class="now-toggle" type="button" aria-expanded="false" aria-controls="update-notice-detail" aria-label="업데이트 상세 보기">
+        <span class="now-ring" aria-hidden="true"><svg class="now-ring-svg" viewBox="0 0 40 40"><circle class="now-ring-track" cx="20" cy="20" r="16"/><circle class="now-ring-fill" cx="20" cy="20" r="16" pathLength="100"/></svg><span id="update-mark" class="now-ring-icon"></span></span>
+        <span id="update-notice-text" class="now-text" role="status"></span>
+        <span id="update-percent" class="now-percent"></span>
+        <span class="now-chevron" aria-hidden="true"></span>
+      </button>
+      <button id="update-restart" class="primary now-action" type="button" hidden>다시 시작</button>
     </div>
   </section>
-  <section id="file-transfer-bar" class="update-now-bar" aria-label="NAS 파일 전송" hidden>
-    <div class="update-now-face">
-      <span id="transfer-mark" class="update-mark" aria-hidden="true"></span>
-      <div class="update-now-text">
-        <p id="transfer-title" role="status"></p>
-        <p id="transfer-name"></p>
-        <div id="transfer-progress" class="update-progress" role="progressbar" aria-label="파일 전송 진행률"
-          aria-valuemin="0" aria-valuemax="100"><span></span></div>
-      </div>
-      <span id="transfer-details" class="update-percent" aria-hidden="true"></span>
+  <section id="file-transfer-bar" class="now-notice" aria-label="파일 작업 알림" hidden>
+    <div id="transfer-failure-panel" class="now-detail" inert>
+      <div class="now-detail-heading"><strong id="transfer-title"></strong><button id="transfer-close" type="button" aria-label="알림 닫기">×</button></div>
+      <div id="transfer-file-list"></div>
+      <p id="transfer-failures" class="now-detail-note" hidden></p>
+    </div>
+    <div class="now-row">
+      <button id="transfer-expand" class="now-toggle" type="button" aria-label="작업 상세 보기" aria-expanded="false" aria-controls="transfer-failure-panel">
+        <span class="now-ring" aria-hidden="true"><svg class="now-ring-svg" viewBox="0 0 40 40"><circle class="now-ring-track" cx="20" cy="20" r="16"/><circle class="now-ring-fill" cx="20" cy="20" r="16" pathLength="100"/></svg><span id="transfer-mark" class="now-ring-icon"></span></span>
+        <span id="transfer-name" class="now-text" role="status"></span>
+        <span id="transfer-details" class="now-percent"></span>
+        <span class="now-chevron" aria-hidden="true"></span>
+      </button>
+      <button id="transfer-retry" class="primary now-action" type="button" hidden>다시 시도</button>
     </div>
   </section>
 </body>

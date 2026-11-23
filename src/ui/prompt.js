@@ -7,9 +7,9 @@ const cancel = document.getElementById('prompt-cancel');
 const message = document.getElementById('prompt-message');
 const detail = document.getElementById('prompt-detail');
 function answer(accepted) {
-  accept.disabled = cancel.disabled = true;
+  for (const button of dialog.querySelectorAll('button')) button.disabled = true;
   void api.answer(accepted).catch(() => {
-    accept.disabled = cancel.disabled = false;
+    for (const button of dialog.querySelectorAll('button')) button.disabled = false;
   });
 }
 const dismiss = () => answer(false);
@@ -27,8 +27,24 @@ void api.details().then(value => {
   message.hidden = !value.message;
   detail.textContent = value.detail || '';
   detail.hidden = !value.detail;
+  if (value.choices) {
+    const actions = document.getElementById('prompt-actions');
+    actions.classList.add('prompt-choices');
+    document.getElementById('prompt-remember').hidden = !value.rememberChoice;
+    actions.replaceChildren(...value.choices.map(choice => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = choice.label;
+      button.className = choice.style || '';
+      button.addEventListener('click', () => answer(value.rememberChoice
+        ? { value: choice.value, applyToRemaining: document.getElementById('prompt-remember-input').checked }
+        : choice.value));
+      return button;
+    }));
+  }
   cancel.hidden = !value.confirm;
   accept.textContent = value.action;
   if (value.danger) accept.className = 'danger';
   dialog.showModal();
+  if (value.choices) dialog.querySelector('.prompt-choices button:last-child').focus();
 }).catch(dismiss);

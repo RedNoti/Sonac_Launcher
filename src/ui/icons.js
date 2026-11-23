@@ -1,6 +1,10 @@
 'use strict';
 
 const outlines = {
+  search: 'M30 30l10 10M34 21a13 13 0 1 1-26 0 13 13 0 0 1 26 0Z',
+  copy: 'M15 15h24v24H15ZM31 9H9v22',
+  sliders: 'M8 12h20m8 0h4M8 24h8m8 0h16M8 36h24m8 0h0M28 12a4 4 0 1 1 8 0 4 4 0 1 1-8 0M16 24a4 4 0 1 1 8 0 4 4 0 1 1-8 0M32 36a4 4 0 1 1 8 0 4 4 0 1 1-8 0',
+  chevron: 'm13 19 11 11 11-11',
   activity: 'M7 24h8l5-11 8 22 5-11h8',
   sparkles: 'M21 9c1.5 8 4.5 11 12.5 12.5C25.5 23 22.5 26 21 34c-1.5-8-4.5-11-12.5-12.5C16.5 20 19.5 17 21 9ZM36 6v8m-4-4h8M36 29v10m-5-5h10',
   star: 'M24 6l5.6 11.4 12.6 1.8-9.1 8.9 2.2 12.5L24 34.7l-11.3 5.9 2.2-12.5-9.1-8.9 12.6-1.8Z',
@@ -37,9 +41,19 @@ const outlines = {
 };
 
 const referenceOutlines = {
+  fsNew: { path: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M12 11v5M9.5 13.5h5' },
+  fsEye: { path: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z M15 12a3 3 0 1 1-6 0 3 3 0 1 1 6 0' },
+  fsOpen: { path: 'M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1 M3.5 11h18.5l-2 7a2 2 0 0 1-2 1.5H6a2 2 0 0 1-2-1.5z' },
+  fsStar: { path: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z' },
+  fsDownload: { path: 'M12 4v11m0 0l-4-4m4 4l4-4M5 20h14' },
+  fsRename: { path: 'M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z M13 7l4 4' },
+  fsExtract: { path: 'M4.5 4h15A1.5 1.5 0 0 1 21 5.5v2A1.5 1.5 0 0 1 19.5 9h-15A1.5 1.5 0 0 1 3 7.5v-2A1.5 1.5 0 0 1 4.5 4z M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9 M12 17v-5m0 0l-2.5 2.5M12 12l2.5 2.5' },
+  fsDelete: { path: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3' },
+  fsAll: { path: 'M7.5 3.5h9a4 4 0 0 1 4 4v9a4 4 0 0 1-4 4h-9a4 4 0 0 1-4-4v-9a4 4 0 0 1 4-4z M8 12.5l3 3 5-6' },
+  fsNone: { path: 'M9 9l6 6M15 9l-6 6', rects: [[3.5,3.5,17,17,4]], dashed: true },
   dsm: { path: 'M12 7h5.5M12 17h5.5', rects: [[3.5,3.5,17,7,2.2],[3.5,13.5,17,7,2.2]], dots: [[7,7,.9],[7,17,.9]] },
   video: { path: 'M10 9l5 3-5 3z', rects: [[3.5,4.5,17,15,1.2]] },
-  audio: { path: 'M9.5 17.5V6.5l8-2v10.5', ellipses: [[7,17.8,2.6,1.9],[15.5,15.2,2.6,1.9]] },
+  audio: { path: 'M9 18V5l11-2v13', circles: [[6,18,3],[17,16,3]] },
   github: { path: 'M6.5 7v10M17.5 11c0 3.5-4 4-11 6', circles: [[6.5,5,2],[6.5,19,2],[17.5,9,2]] },
   terminal: { path: 'M7 10l3 2.2L7 14.4M12.5 15.5h4', rects: [[3,4,18,16,3.2]] },
   sparkles: { path: 'M9 7.5c.6 3.6 1.9 4.9 5.5 5.5-3.6.6-4.9 1.9-5.5 5.5-.6-3.6-1.9-4.9-5.5-5.5C7.1 12.4 8.4 11.1 9 7.5zM17.5 3v5M15 5.5h5M17.5 15v5M15 17.5h5' },
@@ -52,41 +66,37 @@ const referenceOutlines = {
   next: { path: 'M5 5v14l10-7zM19 5v14' }
 };
 
+const svgNamespace = 'http://www.w3.org/2000/svg';
+
+function iconElement(tag, attributes) {
+  const element = document.createElementNS(svgNamespace, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  return element;
+}
+
 function icon(name, color = '#fff') {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 144;
-  canvas.setAttribute('aria-hidden', 'true');
-  const draw = canvas.getContext('2d');
   const reference = referenceOutlines[name];
-  draw.scale(reference ? 6 : 3, reference ? 6 : 3);
-  draw.strokeStyle = color;
-  draw.lineWidth = reference ? 1.6 : 1.8;
-  draw.lineCap = 'round';
-  draw.lineJoin = 'round';
-  if (!reference) draw.stroke(new Path2D(outlines[name]));
-  else {
-    draw.stroke(new Path2D(reference.path));
-    for (const rect of reference.rects ?? []) {
-      draw.beginPath();
-      draw.roundRect(...rect);
-      draw.stroke();
-    }
-    for (const circle of reference.circles ?? []) {
-      draw.beginPath();
-      draw.arc(...circle, 0, 2 * Math.PI);
-      draw.stroke();
-    }
-    for (const ellipse of reference.ellipses ?? []) {
-      draw.beginPath();
-      draw.ellipse(...ellipse, -Math.PI / 9, 0, 2 * Math.PI);
-      draw.stroke();
-    }
-    draw.fillStyle = color;
-    for (const dot of reference.dots ?? []) {
-      draw.beginPath();
-      draw.arc(...dot, 0, 2 * Math.PI);
-      draw.fill();
-    }
+  const size = reference ? 24 : 48;
+  const svg = iconElement('svg', {
+    class: 'ui-icon', viewBox: '0 0 ' + size + ' ' + size, width: 20, height: 20,
+    'aria-hidden': 'true', focusable: 'false',
+    fill: 'none', stroke: color, 'stroke-width': reference ? 1.6 : 1.8,
+    'stroke-linecap': 'round', 'stroke-linejoin': 'round'
+  });
+  const path = reference?.path ?? outlines[name];
+  if (path) svg.append(iconElement('path', { d: path }));
+  for (const [x, y, width, height, rx] of reference?.rects ?? []) {
+    svg.append(iconElement('rect', { x, y, width, height, rx }));
   }
-  return canvas;
+  for (const [cx, cy, r] of reference?.circles ?? []) {
+    svg.append(iconElement('circle', { cx, cy, r }));
+  }
+  for (const [cx, cy, rx, ry] of reference?.ellipses ?? []) {
+    svg.append(iconElement('ellipse', { cx, cy, rx, ry, transform: `rotate(-20 ${cx} ${cy})` }));
+  }
+  for (const [cx, cy, r] of reference?.dots ?? []) {
+    svg.append(iconElement('circle', { cx, cy, r, fill: color, stroke: 'none' }));
+  }
+  if (reference?.dashed) svg.querySelector('rect')?.setAttribute('stroke-dasharray', '3.2 3.2');
+  return svg;
 }

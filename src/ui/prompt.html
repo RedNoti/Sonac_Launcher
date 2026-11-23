@@ -15,7 +15,10 @@
       <p id="prompt-message"></p>
       <p id="prompt-detail" hidden></p>
     </div>
-    <footer class="dialog-actions">
+    <label id="prompt-remember" class="check" hidden>
+      <input id="prompt-remember-input" type="checkbox">앞으로 중복되는 파일에도 이 선택 적용
+    </label>
+    <footer class="dialog-actions" id="prompt-actions">
       <button id="prompt-cancel" type="button" autofocus>취소</button>
       <button id="prompt-accept" type="button" class="primary">확인</button>
     </footer>

@@ -164,3 +164,37 @@ test('DSM starts and polls ZIP extraction without transferring the archive', asy
   await nas.stopExtract(task);
   assert.deepEqual(operations, ['start', 'status', 'stop']);
 });
+
+test('DSM moves selected NAS items on the server without overwriting destination files', async t => {
+  const operations = [];
+  t.mock.method(require('undici'), 'fetch', async (url, { body }) => {
+    if (url.pathname === '/webapi/query.cgi') {
+      assert.match(url.searchParams.get('query'), /SYNO\.FileStation\.CopyMove/u);
+      return Response.json({ success: true, data: {
+        ...methods, 'SYNO.FileStation.CopyMove': { path: 'entry.cgi', minVersion: 3, maxVersion: 3 }
+      } });
+    }
+    const method = body.get('method');
+    if (method === 'login') return Response.json({ success: true, data: { sid: 'fixture-sid' } });
+    if (method === 'list_share') return Response.json({ success: true, data: { shares: [], total: 0 } });
+    operations.push(method);
+    assert.equal(body.get('api'), 'SYNO.FileStation.CopyMove');
+    assert.equal(body.get('version'), '3');
+    if (method === 'start') {
+      assert.deepEqual(JSON.parse(body.get('path')), ['/Shared/a.txt', '/Shared/사진']);
+      assert.equal(JSON.parse(body.get('dest_folder_path')), '/Shared/archive');
+      assert.equal(body.get('remove_src'), operations.length === 1 ? 'true' : 'false');
+      assert.equal(body.get('overwrite'), 'false');
+      return Response.json({ success: true, data: { taskid: 'fixture-move' } });
+    }
+    assert.equal(JSON.parse(body.get('taskid')), 'fixture-move');
+    return Response.json({ success: true, data: { finished: true, progress: 1 } });
+  });
+  const nas = storage(profile);
+  await nas.connect({ password: 'fixture-password' }, '', false);
+  const task = await nas.startMove([{ path: '/Shared/a.txt' }, { path: '/Shared/사진' }], '/Shared/archive');
+  assert.deepEqual(await nas.moveStatus(task), { finished: true, progress: 1 });
+  const copy = await nas.startMove([{ path: '/Shared/a.txt' }, { path: '/Shared/사진' }], '/Shared/archive', undefined, true);
+  assert.deepEqual(await nas.moveStatus(copy), { finished: true, progress: 1 });
+  assert.deepEqual(operations, ['start', 'status', 'start', 'status']);
+});

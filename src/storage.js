@@ -22,7 +22,8 @@ const APIS = {
   mkdir: 'SYNO.FileStation.CreateFolder',
   delete: 'SYNO.FileStation.Delete',
   rename: 'SYNO.FileStation.Rename',
-  extract: 'SYNO.FileStation.Extract'
+  extract: 'SYNO.FileStation.Extract',
+  move: 'SYNO.FileStation.CopyMove'
 };
 const DSM_ERRORS = {
   105: '이 계정에는 File Station 사용 권한이 없습니다.',
@@ -230,17 +231,18 @@ class Synology {
       api: 'SYNO.API.Info', version: '1', method: 'query', query: Object.values(APIS).join(',')
     });
     const info = await dsmJSON(await request(infoURL, { dispatcher: this.dispatcher }, signal), 'DSM API 조회');
-    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2, mkdir: 2, rename: 2, extract: 2 };
+    const supported = { auth: 6, list: 2, download: 2, upload: 2, delete: 2, mkdir: 2, rename: 2, extract: 2, move: 3 };
     delete this.methods.delete;
     delete this.methods.mkdir;
     delete this.methods.rename;
     delete this.methods.extract;
+    delete this.methods.move;
     for (const [type, api] of Object.entries(APIS)) {
       const entry = info?.[api];
       const version = Math.max(Number(entry?.minVersion), Math.min(supported[type], Number(entry?.maxVersion)));
       if (!/^(?:[\w-]+\/)*[\w.-]+\.cgi$/u.test(entry?.path || '') || !Number.isInteger(version) ||
-          version > Number(entry.maxVersion) || (!['auth', 'rename'].includes(type) && version < 2)) {
-        if (['delete', 'mkdir', 'rename', 'extract'].includes(type)) continue;
+          version > Number(entry.maxVersion) || (type === 'move' && version < 3) || (!['auth', 'rename'].includes(type) && version < 2)) {
+        if (['delete', 'mkdir', 'rename', 'extract', 'move'].includes(type)) continue;
         throw new Error('DSM File Station API를 찾을 수 없습니다. NAS에서 File Station 패키지 상태를 확인하세요.');
       }
       this.methods[type] = { api, version: String(version), url: new URL('/webapi/' + entry.path, origin) };
@@ -394,6 +396,25 @@ class Synology {
 
   async stopExtract(task, signal) {
     await dsmJSON(await this.post('extract', 'stop', { taskid: JSON.stringify(task) }, signal));
+  }
+
+  async startMove(entries, destination, signal, copy = false) {
+    if (!this.methods.move) throw new Error('이 NAS에서 File Station 이동 API를 사용할 수 없습니다.');
+    const data = await dsmJSON(await this.post('move', 'start', {
+      path: JSON.stringify(entries.map(entry => remotePath(entry.path))),
+      dest_folder_path: JSON.stringify(remotePath(destination)),
+      remove_src: String(!copy), overwrite: 'false', accurate_progress: 'true'
+    }, signal));
+    if (typeof data?.taskid !== 'string' || !data.taskid || data.taskid.length > 256) {
+      throw new Error('NAS 이동 작업 ID를 확인할 수 없습니다.');
+    }
+    return data.taskid;
+  }
+
+  async moveStatus(task, signal) {
+    const data = await dsmJSON(await this.post('move', 'status', { taskid: JSON.stringify(task) }, signal));
+    if (typeof data?.finished !== 'boolean') throw new Error('NAS 이동 작업 상태를 확인할 수 없습니다.');
+    return data;
   }
 
   async delete(entry, signal) {

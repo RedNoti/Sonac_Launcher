@@ -30,11 +30,13 @@ function drawAreas() {
   areaSignature = signature;
   syncAreas = areas;
   areaGroups = settings.syncGroups.map(group => ({ ...group, items: areas.filter(area => area.groupId === group.id) }));
-  $('areas-empty').hidden = !!base || areaGroups.length > 0;
   const focused = document.activeElement.dataset.areaId;
-  const tiles = areaGroups.map(drawGroupTile);
-  if (base) tiles.unshift(drawAreaTile(base));
-  $('area-list').replaceChildren(...tiles);
+  for (const [list, empty] of [['area-list', 'areas-empty'], ['settings-area-list', 'settings-areas-empty']]) {
+    $(empty).hidden = !!base || areaGroups.length > 0;
+    const tiles = areaGroups.map(drawGroupTile);
+    if (base) tiles.unshift(drawAreaTile(base));
+    $(list).replaceChildren(...tiles);
+  }
   if ($('area-group').open) {
     const group = areaGroups.find(item => item.id === areaGroupId);
     if (group) drawAreaGroup(group);
@@ -48,8 +50,17 @@ function drawAreas() {
   }
 }
 
+function syncSettingsVisible() {
+  return !$('settings-page').hidden && !$('settings-sync').hidden;
+}
+
+function areaAddButton() {
+  return syncSettingsVisible() ? $('settings-area-add') : $('area-add');
+}
+
 function areaTile(id) {
-  const list = $('area-group').open ? $('area-group-list') : $('area-list');
+  const list = $('area-group').open ? $('area-group-list') :
+    syncSettingsVisible() ? $('settings-area-list') : $('area-list');
   return [...list.children].find(item => item.dataset.areaId === id);
 }
 
@@ -390,10 +401,10 @@ function initWorkspace() {
     event.preventDefault();
     void busy(event.submitter, () => api.githubTrack(elements('github-track').repository.value, true), reportGithub)();
   });
-  for (const [id, glyph] of [['area-add', 'add'], ['area-group-add', 'add'], ['area-group-edit', 'pencil']]) {
+  for (const [id, glyph] of [['area-add', 'add'], ['settings-area-add', 'add'], ['area-group-add', 'add'], ['area-group-edit', 'pencil']]) {
     $(id).append(icon(glyph));
   }
-  $('area-add').addEventListener('click', () => openGroupEditor());
+  for (const id of ['area-add', 'settings-area-add']) $(id).addEventListener('click', () => openGroupEditor());
   $('area-group-add').addEventListener('click', () => openArea({ groupId: areaGroupId }));
   $('area-group-edit').addEventListener('click', () => {
     const group = areaGroups.find(item => item.id === areaGroupId);
@@ -404,26 +415,26 @@ function initWorkspace() {
     void busy(event.submitter, async () => {
       const id = await api.areaGroupSave({ id: groupEditing?.id, name: elements('area-group-form').name.value });
       $('area-group-editor').close();
-      if (!$('home').hidden) openAreaGroup(id);
+      if (!$('home').hidden || syncSettingsVisible()) openAreaGroup(id);
       else if (githubOpen) openArea({ groupId: id, repository: groupRepository });
     }, error => notice('area-group-error', error.message, true))();
   });
   $('area-group-remove').addEventListener('click', busy($('area-group-remove'), async () => {
     await api.areaGroupRemove(groupEditing.id);
     $('area-group-editor').close();
-    $('area-add').focus();
+    areaAddButton().focus();
   }, error => notice('area-group-error', error.message, true)));
   $('area-group').addEventListener('close', () => {
     if ($('area-group').open) return;
-    if (!$('home').hidden && !document.querySelector('dialog[open]')) {
-      (areaTile(areaGroupId) || $('area-add')).focus();
+    if ((!$('home').hidden || syncSettingsVisible()) && !document.querySelector('dialog[open]')) {
+      (areaTile(areaGroupId) || areaAddButton()).focus();
     }
     areaGroupId = null;
   });
   $('area-folder').addEventListener('close', () => {
     if ($('area-folder').open) return;
-    if (!$('home').hidden && ($('area-group').open || !document.querySelector('dialog[open]'))) {
-      (areaTile(areaFolderId) || $('area-add')).focus();
+    if ((!$('home').hidden || syncSettingsVisible()) && ($('area-group').open || !document.querySelector('dialog[open]'))) {
+      (areaTile(areaFolderId) || areaAddButton()).focus();
     }
     areaFolderId = null;
   });
@@ -431,8 +442,9 @@ function initWorkspace() {
     const area = syncAreas.find(item => item.id === areaFolderId);
     if (!area || area.running) return;
     $('area-folder').close();
-    if (area.id === 'base') openSettings();
-    else openArea({ area });
+    if (area.id !== 'base') openArea({ area });
+    else if (syncSettingsVisible()) $('pick-remote').focus();
+    else openSettings('sync');
   });
   $('area-folder-run').addEventListener('click', busy($('area-folder-run'), async () => {
     const area = syncAreas.find(item => item.id === areaFolderId);

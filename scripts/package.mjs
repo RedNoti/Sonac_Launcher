@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import asar from '@electron/asar';
+import * as asar from '@electron/asar';
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
 import { writeExecutableIcon, writeMsiSource, writeShortcutProperties, writeUninstallAction } from './windows-msi.mjs';
 import { macSigningConfiguration, signMacBundle, notarizeMacImage } from './mac-sign.mjs';

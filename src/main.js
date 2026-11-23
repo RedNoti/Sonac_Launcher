@@ -45,10 +45,10 @@ const usageModes = new Set(['nas', 'server', 'both']);
 const sessionErrors = new Set([106, 107, 119]);
 const updateBlockingHandlers = new Set(['login', 'logout', 'settings', 'upload', 'download', 'delete',
   'githubConnect', 'githubDisconnect', 'githubTrack', 'areaGroupSave', 'areaGroupRemove', 'areaGroupMove', 'folderFavorite',
-  'areaSave', 'areaRemove', 'areaRun', 'syncAll', 'remoteWrites', 'switchNas', 'mkdir', 'renameFile', 'extractArchive',
+  'areaSave', 'areaRemove', 'areaRun', 'syncAll', 'remoteWrites', 'switchNas', 'mkdir', 'renameFile', 'extractArchive', 'moveNas',
   'serverFileAdd', 'serverFileRemove', 'serverDeploy', 'serverRun', 'serverStop', 'serverGitHubConnect', 'serverGitHubDisconnect',
   'serverMonitorSettings', 'serverMonitorTarget', 'serverMonitorCheck', 'mediaFolder', 'setPreference',
-  'terminalCommandSave', 'terminalCommandRemove']);
+  'terminalCommandSave', 'terminalCommandRemove', 'aiManageChat']);
 const pendingOperations = new Set();
 const areaJobs = new Map();
 const folderSyncJobs = new Map();
@@ -94,6 +94,7 @@ let pendingUsageMode;
 let aiChatJob;
 let aiTitleJob;
 let aiHistoryWrite;
+let aiManageChatBusy = false;
 
 function computerName() {
   if (process.platform === 'darwin') {
@@ -553,22 +554,27 @@ function requireRemoteWrites(connection) {
   if (!connection.remoteWrites) throw new Error('설정에서 NAS 쓰기를 먼저 허용하세요.');
 }
 
-function transferReporter(connection, direction) {
+function transferReporter(connection, direction, items) {
   let previousName;
+  let currentIndex = -1;
+  let sentItems = false;
   let started;
   let lastSent;
-  return (name, bytes, total) => {
+  return (name, bytes, total, index, status, error) => {
     if (current !== connection || !window || window.isDestroyed()) return;
     const now = performance.now();
     if (name !== previousName || bytes === 0) {
+      if (index === undefined) currentIndex++;
       previousName = name;
       started = now;
       lastSent = -Infinity;
     }
-    if (now - lastSent < 120 && bytes !== total) return;
+    if (!status && now - lastSent < 120 && bytes !== total) return;
     lastSent = now;
-    window.webContents.send('launcher:transfer', { name, direction, bytes, total,
+    window.webContents.send('launcher:transfer', { name, direction, bytes, total, index: index ?? currentIndex, status, error, items: sentItems ? undefined : items,
+      elapsed: (now - started) / 1000,
       rate: bytes / Math.max(0.05, (now - started) / 1000) });
+    sentItems = true;
   };
 }
 
@@ -896,6 +902,14 @@ async function listLocal(connection, folder) {
   }));
   connection.abort.signal.throwIfAborted();
   return { root, directory, entries: entries.filter(Boolean) };
+}
+
+function droppedLocalPaths(input, limit) {
+  if (!Array.isArray(input) || !input.length || input.length > limit ||
+      input.some(file => typeof file !== 'string' || file.length > 4096 || !path.isAbsolute(file) || file.includes('\0'))) {
+    throw new Error('한 번에 놓을 수 있는 파일은 최대 ' + limit + '개입니다.');
+  }
+  return [...new Set(input)];
 }
 
 async function selectedEntries(connection, source, folder, paths) {
@@ -1261,6 +1275,7 @@ function serverMonitoringStatus(session) {
   const settings = monitoringSettings(session);
   return {
     enabled: settings.enabled, time: settings.time, hasWebhook: wrapped(settings.webhook),
+    deliveryEnabled: settings.deliveryEnabled ?? wrapped(settings.webhook), dailyReports: settings.dailyReports,
     targets: settings.targets.map(({ id, name, url, latest }) => ({ id, name, url,
       latest: latest && { status: latest.status, at: latest.at, latencyMs: latest.latencyMs, httpStatus: latest.httpStatus } })),
     checking: !!session.monitor?.poll, latestReport: settings.latestReport, error: session.monitor?.error || ''
@@ -1354,16 +1369,27 @@ async function prepareServerMonitoringReport(session, runtime) {
     const previousDaily = settings.lastDaily;
     const previousPending = settings.pending;
     const previousReport = settings.latestReport;
+    const previousHistory = settings.dailyReports;
     if (incident) settings.pending = settings.pending.filter(item => item !== incident);
     else settings.lastDaily = window.day;
-    const webhook = settings.webhook;
+    const webhook = incident || settings.deliveryEnabled !== false ? settings.webhook : undefined;
     const report = { title, text: text.slice(0, 4000), at: Date.now(), delivery: wrapped(webhook) ? 'unconfirmed' : 'local' };
+    if (!incident) {
+      report.day = window.day;
+      report.services = daily.length;
+      report.down = daily.reduce((total, item) => total + item.day.down, 0);
+      report.degraded = daily.reduce((total, item) => total + item.day.degraded, 0);
+      const legacyDaily = /^서버 일일보고 · (\d{4}-\d{2}-\d{2})$/u.exec(previousReport?.title || '')?.[1];
+      const history = previousHistory ?? (legacyDaily ? [{ ...previousReport, day: legacyDaily }] : []);
+      settings.dailyReports = [report, ...history.filter(item => item.day !== report.day)].slice(0, 14);
+    }
     settings.latestReport = report;
     try { await persist(); }
     catch (error) {
       settings.lastDaily = previousDaily;
       settings.pending = previousPending;
       settings.latestReport = previousReport;
+      settings.dailyReports = previousHistory;
       throw error;
     }
     signal.throwIfAborted();
@@ -1641,16 +1667,41 @@ function registerHandlers() {
     if (!Array.isArray(chats)) throw new Error('이 PC에 저장된 AI 대화 형식을 확인하세요.');
     return history.chats ??= chats;
   });
+  bind('aiManageChat', async (id, action, title) => {
+    const account = needAiAccount();
+    if (aiChatJob || aiManageChatBusy) throw new Error('진행 중인 작업이 끝난 뒤 대화를 수정하세요.');
+    const name = typeof title === 'string' ? title.trim() : '';
+    if (action !== 'delete' && (action !== 'rename' || !name || name.length > 80)) {
+      throw new Error('대화 제목을 80자 이내로 입력하세요.');
+    }
+    aiManageChatBusy = true;
+    try {
+      const titleJob = aiTitleJob;
+      titleJob?.controller.abort();
+      await titleJob?.task.catch(() => {});
+      if (needAiAccount() !== account) throw new Error('AI 채팅에 다시 로그인하세요.');
+      const history = account.chatHistory;
+      const index = history?.chats?.findIndex(chat => chat.id === id) ?? -1;
+      if (index < 0) throw new Error('저장된 대화를 찾을 수 없습니다.');
+      const next = history.chats.slice();
+      if (action === 'delete') next.splice(index, 1);
+      else next[index] = { ...next[index], title: name, summarized: true };
+      await saveAiHistory(history, next);
+      return action === 'rename' ? name : null;
+    } finally {
+      aiManageChatBusy = false;
+    }
+  });
   let choosingAiFiles = false;
-  bind('aiPickFiles', async () => {
+  bind('aiPickFiles', async dropped => {
     const account = needAiAccount();
     if (choosingAiFiles) return { files: [], errors: [] };
     choosingAiFiles = true;
     try {
-      const result = await dialog.showOpenDialog(window, {
+      const result = dropped === undefined ? await dialog.showOpenDialog(window, {
         title: 'AI 채팅에 문서 또는 코드 첨부',
         properties: ['openFile', 'multiSelections']
-      });
+      }) : { filePaths: droppedLocalPaths(dropped, attachmentLimit) };
       if (result.canceled) return { files: [], errors: [] };
       if (result.filePaths.length > attachmentLimit) throw new Error('파일은 한 번에 3개까지 첨부할 수 있습니다.');
       const files = [];
@@ -1658,6 +1709,7 @@ function registerHandlers() {
       for (const filename of result.filePaths) {
         const name = path.basename(filename).slice(0, 255);
         try {
+          if (!(await fs.lstat(filename)).isFile()) throw new Error('일반 파일만 첨부할 수 있습니다.');
           const handle = await fs.open(filename, 'r');
           try {
             const info = await handle.stat();
@@ -1685,7 +1737,7 @@ function registerHandlers() {
   });
   bind('aiChat', async (requestId, chatId, content, effort, attachments = []) => {
     const account = needAiAccount();
-    if (aiChatJob) throw new Error('현재 답변이 끝난 뒤 다시 보내세요.');
+    if (aiChatJob || aiManageChatBusy) throw new Error('진행 중인 작업이 끝난 뒤 다시 보내세요.');
     if (!exaone.reasoningEfforts.includes(effort)) throw new Error('추론 강도를 확인하세요.');
     if (![requestId, chatId].every(id => typeof id === 'string' && /^[a-f0-9-]{36}$/u.test(id)) ||
         typeof content !== 'string' || content.length > 12000 || !Array.isArray(attachments) ||
@@ -1760,7 +1812,7 @@ function registerHandlers() {
     const chat = chats?.[index];
     if (!chat) return null;
     if (chat.summarized) return chat.title;
-    if (aiChatJob || aiTitleJob || account.rateLimit?.retryAt > Date.now() ||
+    if (aiChatJob || aiTitleJob || aiManageChatBusy || account.rateLimit?.retryAt > Date.now() ||
         !chat.messages.some(message => message.role === 'assistant')) return null;
     const controller = new AbortController();
     const job = aiTitleJob = { controller };
@@ -1921,8 +1973,10 @@ function registerHandlers() {
       webhook = await seal(safeStorage, monitoringBinding(session), url.href);
     }
     session.abort.signal.throwIfAborted();
-    const previous = { enabled: settings.enabled, time: settings.time, webhook: settings.webhook };
+    const previous = { enabled: settings.enabled, time: settings.time, webhook: settings.webhook,
+      deliveryEnabled: settings.deliveryEnabled };
     Object.assign(settings, { enabled: input.enabled, time: input.time,
+      deliveryEnabled: typeof input.deliveryEnabled === 'boolean' ? input.deliveryEnabled : settings.deliveryEnabled,
       webhook: webhook ?? (input.removeWebhook === true ? undefined : settings.webhook) });
     return persistMonitoringChange(session, () => {
       if (settings.enabled === input.enabled && settings.time === input.time) Object.assign(settings, previous);
@@ -1948,7 +2002,18 @@ function registerHandlers() {
   bind('promptAnswer', accepted => {
     const prompt = activePrompt;
     setImmediate(() => {
-      if (activePrompt === prompt) closePrompt(accepted === true);
+      if (activePrompt !== prompt) return;
+      const choices = prompt.details.choices;
+      if (choices) {
+        const value = prompt.details.rememberChoice ? accepted?.value : accepted;
+        const selected = choices.find(choice => choice.value === value);
+        if (!selected) closePrompt(false);
+        else if (prompt.details.rememberChoice) {
+          closePrompt({ value: selected.value, applyToRemaining: accepted.applyToRemaining === true });
+        } else closePrompt(selected.value);
+      } else {
+        closePrompt(accepted === true);
+      }
     });
   }, 'prompt');
   bind('state', status);
@@ -2354,12 +2419,21 @@ function registerHandlers() {
       layoutJob = null;
     }
   });
-  bind('upload', async folder => {
+  bind('upload', async (folder, dropped, retryId) => {
     const connection = needConnection();
     requireRemoteWrites(connection);
     const location = remotePath(folder);
     if (location === '/' && connection.profile.provider === 'synology') throw new Error('업로드할 공유 폴더를 선택하세요.');
-    const result = await dialog.showOpenDialog(window, { title: '업로드할 파일 선택', properties: ['openFile', 'multiSelections'] });
+    let result;
+    if (retryId !== undefined) {
+      const retry = connection.uploadRetry;
+      if (!retry || retry.id !== retryId || retry.folder !== location) throw new Error('다시 시도할 업로드를 찾을 수 없습니다. 파일을 다시 선택하세요.');
+      result = { filePaths: retry.files };
+    } else {
+      result = dropped === undefined
+        ? await dialog.showOpenDialog(window, { title: '업로드할 파일 선택', properties: ['openFile', 'multiSelections'] })
+        : { filePaths: droppedLocalPaths(dropped, 1000) };
+    }
     if (result.canceled) return null;
     if (!await confirmChange(connection, {
       title: 'NAS 파일 업로드', message: result.filePaths.length + '개 파일을 NAS에 업로드할까요?',
@@ -2367,24 +2441,110 @@ function registerHandlers() {
       action: '업로드'
     })) return null;
     const errors = [];
-    const progress = transferReporter(connection, 'upload');
+    const failedPaths = [];
+    const items = await Promise.all(result.filePaths.map(async filename => ({
+      name: path.basename(filename),
+      size: await fs.lstat(filename).then(info => info.isFile() ? info.size : null).catch(() => null)
+    })));
+    const progress = transferReporter(connection, 'upload', items);
     let uploaded = 0;
-    for (const filename of result.filePaths) {
+    let skipped = 0;
+    let conflictAction;
+    for (const [index, filename] of result.filePaths.entries()) {
       connection.abort.signal.throwIfAborted();
       const name = path.basename(filename);
+      progress(name, 0, items[index].size, index);
       try {
         requireRemoteWrites(connection);
-        fileName(name);
-        if ([LAYOUT_FILE, manifestName].includes(name.toLowerCase())) throw new Error('동기화 제어 파일은 업로드할 수 없습니다.');
+        writableName(name);
         if (!(await fs.lstat(filename)).isFile()) throw new Error('일반 파일만 업로드할 수 있습니다.');
+        const siblings = await operate(connection, (store, signal) => store.list(location, signal));
+        const key = value => value.normalize('NFC').toLowerCase();
+        const existing = siblings.find(item => key(item.name) === key(name));
+        let targetName = name;
+        let overwrite = false;
+        if (existing) {
+          const choice = conflictAction ? { value: conflictAction } : await showPrompt({
+            title: '같은 이름의 파일이 있습니다', message: name, rememberChoice: true, detail: location + '\n업로드 방법을 선택하세요.',
+            choices: [
+              { value: 'keepBoth', label: '이름을 바꿔 둘 다 저장', style: 'primary' },
+              { value: 'overwrite', label: '덮어쓰기', style: 'danger' },
+              { value: 'skip', label: '건너뛰기' }
+            ]
+          });
+          requireRemoteWrites(connection);
+          if (choice?.applyToRemaining) conflictAction = choice.value;
+          if (!choice || choice.value === 'skip') {
+            skipped++;
+            progress(name, 0, items[index].size, index, 'skipped');
+            continue;
+          }
+          if (choice.value === 'overwrite') {
+            if (existing.directory) throw new Error('같은 이름의 폴더는 파일로 덮어쓸 수 없습니다.');
+            overwrite = true;
+            targetName = existing.name;
+          } else {
+            const names = new Set(siblings.map(item => key(item.name)));
+            const extension = path.extname(name);
+            const stem = name.slice(0, name.length - extension.length);
+            let suffix = 1;
+            do { targetName = stem + ' (' + suffix++ + ')' + extension; } while (names.has(key(targetName)));
+            writableName(targetName);
+          }
+        }
         const blob = await openAsBlob(filename);
-        await operate(connection, (store, signal) => store.upload(location, name, blob, { signal, progress }));
+        await operate(connection, (store, signal) => store.upload(location, targetName, blob, { overwrite, signal, progress: (name, bytes, total) => progress(name, bytes, total, index) }));
         uploaded++;
+        progress(targetName, blob.size, blob.size, index, 'done');
       } catch (error) {
-        errors.push(name + ' · ' + displayError(error));
+        const message = displayError(error);
+        errors.push(name + ' · ' + message);
+        failedPaths.push(filename);
+        progress(name, 0, items[index].size, index, 'error', message);
       }
     }
-    return { uploaded, errors };
+    const nextRetry = failedPaths.length ? { id: randomUUID(), folder: location, files: failedPaths } : undefined;
+    connection.uploadRetry = nextRetry;
+    return { uploaded, skipped, errors, retryId: nextRetry?.id };
+  });
+  bind('moveNas', async (folder, paths, destination, copy = false) => {
+    if (typeof copy !== 'boolean') throw new Error('파일 작업을 확인하세요.');
+    const connection = needConnection();
+    requireRemoteWrites(connection);
+    const source = remotePath(folder);
+    const target = remotePath(destination);
+    if (source === '/' || target === '/' || source === target) throw new Error('다른 NAS 폴더를 선택하세요.');
+    const { entries } = await selectedEntries(connection, 'remote', source, paths);
+    if (entries.some(entry => entry.path === target || target.startsWith(entry.path + '/'))) {
+      throw new Error('폴더를 자기 자신이나 하위 폴더로 옮길 수 없습니다.');
+    }
+    if (!await confirmChange(connection, {
+      title: copy ? 'NAS 항목 복사' : 'NAS 항목 이동', message: entries.length + (copy ? '개 항목을 이 폴더로 복사할까요?' : '개 항목을 이 폴더로 옮길까요?'),
+      detail: connection.profile.url + '\n' + target, action: copy ? '복사' : '이동'
+    })) return null;
+    const task = await operate(connection, async (store, signal) => {
+      const siblings = await store.list(target, signal);
+      const names = new Set(siblings.map(item => item.name.normalize('NFC').toLowerCase()));
+      if (entries.some(item => names.has(item.name.normalize('NFC').toLowerCase()))) {
+        throw new Error('대상 폴더에 같은 이름의 항목이 있습니다.');
+      }
+      requireRemoteWrites(connection);
+      return store.startMove(entries, target, signal, copy);
+    });
+    const progress = transferReporter(connection, copy ? 'copy' : 'move');
+    while (true) {
+      const status = await operate(connection, (store, signal) => store.moveStatus(task, signal));
+      if (status.finished) {
+        const listing = await operate(connection, (store, signal) => store.list(copy ? target : source, signal));
+        const present = new Set(listing.map(entry => entry.name));
+        const completed = entries.filter(entry => copy ? present.has(entry.name) : !present.has(entry.name)).length;
+        return { moved: completed, total: entries.length };
+      }
+      const percent = Number.isFinite(status.progress) && status.progress >= 0
+        ? Math.round(status.progress * 100) : null;
+      progress(target, percent ?? 0, percent === null ? null : 100);
+      await delay(1000, undefined, { signal: connection.abort.signal });
+    }
   });
   bind('mkdir', async (folder, input) => {
     const connection = needConnection();

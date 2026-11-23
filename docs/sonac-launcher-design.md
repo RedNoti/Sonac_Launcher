@@ -74,6 +74,6 @@
 | `src/ui/index.html` | 시작·홈·설정·파일·서버·AI·미디어 화면과 대화상자 |
 | `src/ui/style.css` | 디자인 토큰, 반응형 배치, 상태, keyframes |
 | `src/ui/app.js` | 페이지 전환, 로그인 패널, 첫 실행 단계, 알림 타이머, 미디어 이벤트 |
-| `src/ui/icons.js` | 캔버스 아이콘 경로와 렌더링 |
+| `src/ui/icons.js` | 벡터 아이콘 경로와 렌더링 |
 | `src/ui/terminal.html`, `src/ui/terminal-ui.mjs` | 별도 터미널 화면과 세션·명령 상호작용 |
 | `src/ui/prompt.html`, `src/ui/prompt.js` | 별도 확인 창과 버튼 처리 |

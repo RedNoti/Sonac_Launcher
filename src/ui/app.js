@@ -93,6 +93,10 @@ function button(text, callback, className) {
 }
 
 function notice(id, message = '', error = false) {
+  if (id === 'browser-status' && message && state && typeof fileTransferBar !== 'undefined') {
+    finishFileTransfer('files', message, error);
+    message = '';
+  }
   const node = $(id);
   node.textContent = message;
   node.hidden = !message;
@@ -415,10 +419,28 @@ let deployProject;
 let logProject;
 let logTimer;
 
+const serverPanelTimers = new Map();
+function setServerPanel(id, control, open, duration) {
+  const panel = $(id);
+  clearTimeout(serverPanelTimers.get(id));
+  $(control).setAttribute('aria-expanded', String(open));
+  panel.inert = !open;
+  if (open) {
+    panel.hidden = false;
+    void panel.offsetHeight;
+    panel.dataset.open = '';
+  } else {
+    delete panel.dataset.open;
+    if (reducedMotion.matches) panel.hidden = true;
+    else serverPanelTimers.set(id, setTimeout(() => { panel.hidden = true; }, duration));
+  }
+}
 function setServerMonitoringView(open) {
-  $('server-monitor-toggle').setAttribute('aria-expanded', String(open));
-  $('server-monitoring').classList.toggle('show-monitor-controls', open);
-  $('server-monitor-controls').hidden = !open;
+  setServerPanel('server-monitor-controls', 'server-monitor-options-button', open, 220);
+}
+function setServerRegistration(open) {
+  setServerPanel('server-monitor-add', 'server-monitor-register', open, 500);
+  if (open) elements('server-monitor-target').name.focus({ preventScroll: true });
 }
 
 async function showDeployment(file) {
@@ -521,6 +543,7 @@ function drawServerHome(previous) {
     if (previous) {
       closeServerLogs();
       setServerMonitoringView(false);
+      setServerRegistration(false);
       setServerProjectForm(false);
       $('server-file-form').reset();
       $('server-file-list').replaceChildren();
@@ -635,7 +658,7 @@ function drawServerHome(previous) {
 function drawServerMonitoring(monitoring, previous) {
   $('server-monitor-toggle').hidden = !monitoring;
   $('server-monitor-check').disabled = !!monitoring?.checking || !monitoring?.targets.length;
-  $('server-monitor-check').textContent = monitoring?.checking ? '확인 중…' : '전체 확인';
+  $('server-monitor-check').replaceChildren(icon('sync'), monitoring?.checking ? '확인 중…' : '전체 확인');
   const form = elements('server-monitor-settings');
   if (!monitoring) {
     if (previous) {
@@ -646,43 +669,146 @@ function drawServerMonitoring(monitoring, previous) {
   }
   $('server-monitor-summary').textContent = (monitoring.enabled ? '모니터링 켜짐' : '모니터링 꺼짐') +
     ' · 등록된 서비스 ' + monitoring.targets.length + '개';
+  $('server-monitor-summary').classList.toggle('monitoring-live', monitoring.enabled);
   if (!previous || monitoring.enabled !== previous.enabled || monitoring.time !== previous.time ||
-      monitoring.hasWebhook !== previous.hasWebhook) {
+      monitoring.hasWebhook !== previous.hasWebhook || monitoring.deliveryEnabled !== previous.deliveryEnabled) {
     form.enabled.checked = monitoring.enabled;
+    form.deliveryEnabled.checked = monitoring.deliveryEnabled ?? monitoring.hasWebhook;
     form.time.value = monitoring.time;
     form.removeWebhook.checked = false;
     form.webhook.placeholder = monitoring.hasWebhook ? '저장됨 · 바꾸려면 새 주소 입력' : '선택 사항';
     $('server-monitor-remove-webhook').hidden = !monitoring.hasWebhook;
   }
-  if (monitoring.checking !== previous?.checking || JSON.stringify(monitoring.targets) !== JSON.stringify(previous?.targets)) {
-    const labels = { healthy: '정상', degraded: '경고', down: '장애' };
-    $('server-monitor-targets').replaceChildren(...monitoring.targets.map(target => {
-      const row = make('article', '', 'server-monitor-card');
-      const { status, latencyMs } = target.latest ?? {};
-      row.dataset.tone = { healthy: 'good', degraded: 'warn', down: 'bad' }[status] ?? 'idle';
+  const container = $('server-monitor-targets');
+  const existing = new Map([...container.querySelectorAll('.server-monitor-card')].map(row => [row.dataset.target, row]));
+  container.querySelector('.server-sites-empty')?.remove();
+  const ids = new Set(monitoring.targets.map(target => target.id));
+  for (const [id, row] of existing) {
+    if (!ids.has(id) && !row.hasAttribute('data-removing')) {
+      row.dataset.removing = '';
+      row.inert = true;
+      clearTimeout(row.armTimer);
+      setTimeout(() => row.remove(), reducedMotion.matches ? 0 : 350);
+    }
+  }
+  const labels = { healthy: '정상', degraded: '느림', down: '응답 없음' };
+  monitoring.targets.forEach((target, index) => {
+    let row = existing.get(target.id);
+    if (!row || row.hasAttribute('data-removing')) {
+      row = make('article', '', 'server-monitor-card');
+      row.dataset.target = target.id;
+      row.style.setProperty('--site-index', index);
       const name = make('div', '', 'server-site-name');
-      name.append(make('h3', target.name), make('p', target.url, 'work-meta'));
-      const check = button('확인', () => void checkServerSites(target.id));
-      check.disabled = !!monitoring.checking;
-      const remove = button('', () => void busy(remove, async () => apply(await api.serverMonitorTarget(target.id, true)),
-        error => notice('server-monitor-error', error.message, true))(), 'server-icon-button server-site-remove');
+      name.append(make('span', '', 'server-site-dot'), make('h3', target.name));
+      const address = make('p', target.url, 'server-site-url');
+      address.title = target.url;
+      const latency = make('div', '', 'server-site-latency');
+      latency.setAttribute('aria-hidden', 'true');
+      latency.append(make('span'));
+      const check = button('', () => void checkServerSites(target.id), 'server-icon-button');
+      check.title = '다시 확인';
+      check.setAttribute('aria-label', target.name + ' 다시 확인');
+      check.append(icon('sync', 'currentColor'));
+      const remove = button('', () => {
+        if (!remove.classList.contains('armed')) {
+          remove.classList.add('armed');
+          remove.setAttribute('aria-label', target.name + ' 한 번 더 누르면 삭제');
+          remove.title = '한 번 더 누르면 삭제';
+          row.armTimer = setTimeout(() => {
+            remove.classList.remove('armed');
+            remove.setAttribute('aria-label', target.name + ' 제거');
+            remove.title = '제거';
+          }, 2500);
+          return;
+        }
+        clearTimeout(row.armTimer);
+        void busy(remove, async () => {
+          apply(await api.serverMonitorTarget(target.id, true));
+          toast('서비스를 삭제했습니다.');
+        }, error => { remove.classList.remove('armed'); notice('server-monitor-error', error.message, true); })();
+      }, 'server-icon-button server-site-remove');
       remove.setAttribute('aria-label', target.name + ' 제거');
       remove.title = '제거';
-      remove.append(icon('trash', '#a9c6f8'));
-      const result = [labels[status] ?? '확인 대기', latencyMs === undefined ? '' : latencyMs + 'ms'].filter(Boolean).join(' · ');
-      row.append(make('span', '', 'server-site-dot'), name, make('span', result, 'server-site-result'), check, remove);
-      return row;
-    }));
-    if (!monitoring.targets.length) $('server-monitor-targets').append(make('p', '등록된 웹페이지가 없습니다.', 'work-meta'));
+      remove.append(icon('fsDelete', 'currentColor'));
+      const footer = make('div', '', 'server-site-footer');
+      footer.append(make('span', '', 'server-site-result'), check, remove);
+      row.append(name, address, latency, footer);
+      container.append(row);
+    }
+    const { status, latencyMs } = target.latest ?? {};
+    const checking = serverSiteChecks.has('*') || serverSiteChecks.has(target.id) || !!monitoring.checking && !serverSiteChecks.size;
+    row.dataset.tone = checking ? 'checking' : ({ healthy: 'good', degraded: 'warn', down: 'bad' }[status] ?? 'idle');
+    row.setAttribute('aria-busy', String(checking));
+    row.querySelector('.server-site-result').textContent = checking ? '확인 중…' :
+      [labels[status] ?? '확인 대기', Number.isFinite(latencyMs) ? latencyMs + 'ms' : ''].filter(Boolean).join(' · ');
+    row.querySelector('.server-site-latency span').style.width = (checking ? 0 : status === 'down' ? 100 :
+      Number.isFinite(latencyMs) ? Math.min(100, Math.max(0, latencyMs / 15)) : 0) + '%';
+    row.querySelector('.server-icon-button').disabled = !!monitoring.checking || !!serverSiteChecks.size;
+  });
+  if (!monitoring.targets.length && !container.querySelector('.server-sites-empty')) {
+    container.append(make('p', '서비스를 등록하면 상태와 응답 시간을 확인할 수 있습니다.', 'work-meta server-sites-empty'));
   }
+  for (const choice of $('server-monitor-times').querySelectorAll('button')) choice.setAttribute('aria-pressed', String(choice.dataset.time === form.time.value));
   if (monitoring.error !== previous?.error) notice('server-monitor-error', monitoring.error, true);
-  const report = monitoring.latestReport;
-  $('server-monitor-report').hidden = !report;
-  if (!report) return;
-  $('server-monitor-report-title').textContent = report.title;
+  drawServerReports(monitoring, previous);
+}
+
+function drawServerReports(monitoring, previous) {
+  const time = monitoring.time || '09:00';
+  const [hour, minute] = time.split(':');
+  const timeLabel = (Number(hour) >= 12 ? '오후 ' : '오전 ') + (Number(hour) % 12 || 12) + ':' + minute;
+  const deliveryOn = monitoring.hasWebhook && monitoring.deliveryEnabled !== false;
+  $('server-report-schedule').textContent = '매일 ' + timeLabel + ' (한국 시간) · ' +
+    (deliveryOn ? 'Discord 전송' : '런처에 저장');
+  const list = $('server-report-list');
+  const signature = JSON.stringify([monitoring.dailyReports, monitoring.latestReport]);
+  if (list.dataset.signature === signature) return;
+  list.dataset.signature = signature;
+  const expanded = new Set([...list.querySelectorAll('.server-report-card.is-open')].map(card => card.dataset.report));
+  const firstDraw = !list.querySelector('.server-report-card');
+  const history = [...(monitoring.dailyReports ?? [])];
+  if (monitoring.latestReport && !history.some(report => report.at === monitoring.latestReport.at)) history.unshift(monitoring.latestReport);
   const delivery = { local: '런처에 저장됨', sent: 'Discord 전송 완료', failed: 'Discord 전송 실패', unconfirmed: 'Discord 전송 확인 대기' };
-  $('server-monitor-report-info').textContent = shortDate.format(report.at) + ' · ' + delivery[report.delivery];
-  $('server-monitor-report-text').textContent = report.text;
+  list.replaceChildren(...history.map((report, index) => {
+    const observedDay = report.day || /\b(\d{4}-\d{2}-\d{2})$/u.exec(report.title)?.[1];
+    const date = new Date(observedDay ? observedDay + 'T00:00:00+09:00' : report.at);
+    const parts = new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', weekday: 'short' })
+      .formatToParts(date);
+    const part = type => parts.find(item => item.type === type)?.value;
+    const card = make('article', '', 'server-report-card');
+    card.style.setProperty('--report-index', index);
+    card.dataset.report = String(report.at);
+    const open = expanded.has(card.dataset.report) || (firstDraw && index === 0);
+    card.classList.toggle('is-open', open);
+    const header = button('', null, 'server-report-toggle');
+    header.setAttribute('aria-expanded', String(open));
+    const body = make('div', '', 'server-report-body');
+    body.id = 'server-report-body-' + index;
+    body.inert = !open;
+    header.setAttribute('aria-controls', body.id);
+    header.addEventListener('click', () => {
+      const expanded = card.classList.toggle('is-open');
+      header.setAttribute('aria-expanded', String(expanded));
+      body.inert = !expanded;
+    });
+    const dateTile = make('span', '', 'server-report-date');
+    dateTile.append(make('strong', part('day')), make('small', part('month') + '월 · ' + part('weekday')));
+    const info = make('span', '', 'server-report-meta');
+    info.append(make('strong', report.title), make('small', shortDate.format(report.at) + ' · ' + delivery[report.delivery]));
+    if (Number.isFinite(report.services)) {
+      const counts = make('span', '', 'server-report-counts');
+      counts.append(make('span', '서비스 ' + report.services), make('span', report.down ? '다운 ' + report.down + '건' : '정상 운영', report.down ? 'bad' : 'good'),
+        make('span', '지연 ' + (report.degraded ?? 0) + '건'));
+      info.append(counts);
+    }
+    header.append(dateTile, info, icon('chevron', '#9aa1ae'));
+    const content = make('div');
+    content.append(make('p', report.text, 'server-monitor-report-text'));
+    body.append(content);
+    card.append(header, body);
+    return card;
+  }));
+  if (!history.length) list.append(make('p', '아직 생성된 보고서가 없습니다.', 'work-meta'));
 }
 
 const usagePercent = new Intl.NumberFormat('ko-KR', { style: 'percent', maximumFractionDigits: 1 });
@@ -764,42 +890,149 @@ function drawAiRequestStatus() {
   if (visibleRequest || wait > 0) aiStatusTimer = setTimeout(drawAiRequestStatus, wait > 0 ? Math.min(wait, 1000) : 1000);
 }
 
+let aiManageTarget;
+
+function showAiManage(chat, action) {
+  aiManageTarget = { chat, action };
+  const deleting = action === 'delete';
+  $('ai-manage-title').textContent = deleting ? '대화 삭제' : '대화 이름 바꾸기';
+  $('ai-manage-name').hidden = deleting;
+  const input = elements('ai-manage-form').title;
+  input.required = !deleting;
+  input.value = chat.title;
+  notice('ai-manage-confirm', deleting ? '“' + chat.title + '” 대화를 삭제할까요?' : '');
+  notice('ai-manage-error');
+  const submit = $('ai-manage-submit');
+  submit.textContent = deleting ? '삭제' : '저장';
+  submit.className = deleting ? 'danger' : 'primary';
+  $('ai-manage-dialog').showModal();
+  if (!deleting) input.select();
+}
+
 function drawAiChatList() {
   const list = $('ai-chat-list');
-  list.replaceChildren(...aiChats.map(chat => {
+  const query = $('ai-search').value.trim().toLocaleLowerCase('ko');
+  const matches = aiChats.filter(chat => !query || chat.title.toLocaleLowerCase('ko').includes(query));
+  list.replaceChildren(...matches.map(chat => {
     const item = button(chat.title, () => {
       activeAiChat = chat;
+      if (aiSidebarMedia.matches) setAiSidebar(false);
       notice('ai-error');
       drawAiChat(true);
       scheduleAiTitle();
     });
     item.title = chat.title;
     item.setAttribute('aria-pressed', String(chat === activeAiChat));
-    return item;
+    if (!chat.messages.some(message => message.role === 'assistant')) return item;
+    const row = make('div', '', 'ai-chat-row');
+    const more = make('div', '', 'ai-chat-more');
+    const summary = button('');
+    summary.title = '대화 관리';
+    summary.setAttribute('aria-label', chat.title + ' 관리');
+    summary.append(icon('more'));
+    const actions = make('div', '', 'ai-chat-menu');
+    actions.id = 'ai-chat-menu-' + chat.id;
+    actions.setAttribute('popover', 'auto');
+    actions.setAttribute('aria-label', chat.title + ' 관리');
+    summary.setAttribute('popovertarget', actions.id);
+    summary.setAttribute('aria-expanded', 'false');
+    actions.addEventListener('toggle', event => {
+      summary.setAttribute('aria-expanded', String(event.newState === 'open'));
+    });
+    summary.addEventListener('click', event => {
+      event.preventDefault();
+      if (actions.matches(':popover-open')) return actions.hidePopover();
+      actions.showPopover();
+      const anchor = summary.getBoundingClientRect();
+      const bounds = actions.getBoundingClientRect();
+      actions.style.left = Math.max(8, Math.min(innerWidth - bounds.width - 8, anchor.right - bounds.width)) + 'px';
+      const below = anchor.bottom + 6;
+      actions.style.top = Math.max(8, below + bounds.height > innerHeight - 8
+        ? anchor.top - bounds.height - 6 : below) + 'px';
+    });
+    for (const [action, label] of [['rename', '이름 바꾸기'], ['delete', '삭제']]) {
+      actions.append(button(label, () => {
+        actions.hidePopover();
+        showAiManage(chat, action);
+      }, action === 'delete' ? 'danger' : ''));
+    }
+    more.append(summary, actions);
+    row.append(item, more);
+    return row;
   }));
+  if (query && !matches.length) list.append(make('p', '검색 결과가 없습니다.', 'work-meta ai-search-empty'));
+  $('ai-title').textContent = activeAiChat?.messages.length ? activeAiChat.title : 'AI 채팅';
 }
 
 function aiFeedAtBottom(feed) {
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 4;
 }
 
+function aiFileCard(file, onRemove) {
+  const item = make('span', '', 'ai-attachment-chip');
+  const extension = file.name.includes('.') ? file.name.split('.').at(-1).slice(0, 7).toUpperCase() : '파일';
+  const meta = make('span', '', 'ai-file-meta');
+  meta.append(make('strong', file.name));
+  if (file.truncated) meta.append(make('small', '일부 첨부됨'));
+  item.title = file.name;
+  item.append(make('span', extension, 'ai-file-extension'), meta);
+  if (onRemove) {
+    const remove = button('×', onRemove);
+    remove.setAttribute('aria-label', file.name + ' 첨부 제거');
+    item.append(remove);
+  }
+  return item;
+}
+
 function drawAiAttachments() {
   const container = $('ai-attachments');
   const files = activeAiChat?.draftFiles ?? [];
-  container.replaceChildren(...files.map(file => {
-    const item = make('span', '', 'ai-attachment-chip');
-    const remove = button('×', () => {
-      activeAiChat.draftFiles = activeAiChat.draftFiles.filter(other => other !== file);
-      drawAiAttachments();
-      drawAiRequestStatus();
-      $('ai-attach').focus();
-    });
-    remove.setAttribute('aria-label', file.name + ' 첨부 제거');
-    item.title = file.truncated ? file.name + ' · 처음 12,000자만 첨부됨' : file.name;
-    item.append(make('span', file.name + (file.truncated ? ' · 일부' : '')), remove);
-    return item;
-  }));
+  container.replaceChildren(...files.map(file => aiFileCard(file, () => {
+    activeAiChat.draftFiles = activeAiChat.draftFiles.filter(other => other !== file);
+    drawAiAttachments();
+    drawAiRequestStatus();
+    $('ai-attach').focus();
+  })));
   container.hidden = !files.length;
+}
+
+function aiMessage(role, content, attachments, streaming = false) {
+  const message = make('article', '', 'ai-message ' + role);
+  const text = make('p', content, streaming ? 'ai-streaming' : '');
+  if (role === 'user') {
+    if (attachments?.length) {
+      const files = make('div', '', 'ai-message-files');
+      files.append(...attachments.map(file => aiFileCard(file)));
+      message.append(files);
+    }
+    if (content) message.append(text);
+    return message;
+  }
+  const avatar = make('span', '', 'ai-avatar');
+  avatar.append(icon('sparkles'));
+  const body = make('div', '', 'ai-answer');
+  body.append(text);
+  if (streaming) {
+    const loading = make('span', '', 'ai-writing-dots');
+    loading.setAttribute('aria-hidden', 'true');
+    loading.append(make('i'), make('i'), make('i'));
+    body.append(loading);
+  } else {
+    const copy = button('', async () => {
+      try {
+        await navigator.clipboard.writeText(content);
+        toast('답변을 복사했습니다.');
+      } catch {
+        toast('답변을 복사할 수 없습니다.');
+      }
+    }, 'ai-copy');
+    copy.title = '답변 복사';
+    copy.setAttribute('aria-label', copy.title);
+    copy.append(icon('copy'));
+    body.append(copy);
+  }
+  message.append(avatar, body);
+  return message;
 }
 
 function drawAiChat(resetScroll = false) {
@@ -808,14 +1041,14 @@ function drawAiChat(resetScroll = false) {
   const feed = $('ai-messages');
   const previousScroll = feed.scrollTop;
   const follow = resetScroll || aiFeedAtBottom(feed);
-  feed.replaceChildren(...(activeAiChat?.messages ?? []).map(({ role, content, attachments }) => {
-    const message = make('p', content, 'ai-message ' + role);
-    if (attachments?.length) message.prepend(make('span', attachments.map(file => '첨부 · ' + file.name).join('\n'), 'ai-message-files'));
-    return message;
-  }));
-  if (aiRequest && aiRequest.chat === activeAiChat) {
-    feed.append(make('p', aiRequest.answer, 'ai-message assistant ai-streaming'));
-  }
+  const messages = activeAiChat?.messages ?? [];
+  const pending = aiRequest && aiRequest.chat === activeAiChat;
+  const empty = !messages.length && !pending;
+  $('ai-welcome').hidden = !empty;
+  $('ai-suggestions').hidden = !empty;
+  $('ai-home').classList.toggle('ai-empty', empty);
+  feed.replaceChildren(...messages.map(({ role, content, attachments }) => aiMessage(role, content, attachments)));
+  if (pending) feed.append(aiMessage('assistant', aiRequest.answer, undefined, true));
   feed.scrollTop = follow ? feed.scrollHeight : previousScroll;
   drawAiRequestStatus();
 }
@@ -842,6 +1075,8 @@ function newAiChat() {
     aiChats.unshift(activeAiChat);
   }
   notice('ai-error');
+  $('ai-search').value = '';
+  if (aiSidebarMedia.matches) setAiSidebar(false);
   drawAiChat(true);
   scheduleAiTitle();
   elements('ai-form').message.focus();
@@ -895,19 +1130,89 @@ function showSigninCurrent() {
 
 const updateBar = $('update-bar');
 const updateNowBar = $('update-now-bar');
-const updateDownloadFace = $('update-download-face');
-const updateReadyFace = $('update-ready-face');
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-let nowBarTimers = [];
-let nowBarOpenedAt;
-let pendingReadyFace;
 let dismissedUpdate;
 let restartingUpdate = false;
 
-function clearNowBarTimers() {
-  for (const timer of nowBarTimers) clearTimeout(timer);
-  nowBarTimers = [];
-  pendingReadyFace = undefined;
+function nowNotice(element, detail, toggle) {
+  let timers = [];
+  let shown = false;
+  let expanded = false;
+  const clear = () => { timers.forEach(clearTimeout); timers = []; };
+  const fit = () => {
+    element.style.height = expanded ? 60 + detail.getBoundingClientRect().height + 'px' : '60px';
+  };
+  const setExpanded = value => {
+    expanded = value;
+    element.toggleAttribute('data-details-open', value);
+    toggle.setAttribute('aria-expanded', String(value));
+    detail.inert = !value;
+    fit();
+  };
+  toggle.addEventListener('click', () => setExpanded(!expanded));
+  const observer = new ResizeObserver(fit);
+  observer.observe(detail);
+  return {
+    show() {
+      if (shown) return;
+      shown = true;
+      clear();
+      element.hidden = false;
+      element.style.height = '60px';
+      if (reducedMotion.matches) {
+        element.dataset.visible = element.dataset.expanded = '';
+      } else {
+        timers.push(setTimeout(() => { element.dataset.visible = ''; }, 20),
+          setTimeout(() => { element.dataset.expanded = ''; }, 550));
+      }
+    },
+    hide() {
+      if (!shown) return;
+      shown = false;
+      clear();
+      setExpanded(false);
+      delete element.dataset.expanded;
+      if (reducedMotion.matches) {
+        delete element.dataset.visible;
+        element.hidden = true;
+      } else {
+        timers.push(setTimeout(() => { delete element.dataset.visible; }, 520),
+          setTimeout(() => { element.hidden = true; }, 1000));
+      }
+    },
+    collapse: () => setExpanded(false),
+    fit,
+    motionChanged() {
+      clear();
+      if (shown) element.dataset.visible = element.dataset.expanded = '';
+      else {
+        delete element.dataset.visible;
+        delete element.dataset.expanded;
+        element.hidden = true;
+      }
+      fit();
+    }
+  };
+}
+
+const updateNotice = nowNotice(updateNowBar, $('update-notice-detail'), $('update-notice-toggle'));
+new ResizeObserver(entries => {
+  const height = entries[0].borderBoxSize?.[0]?.blockSize ?? updateNowBar.getBoundingClientRect().height;
+  document.documentElement.style.setProperty('--update-notice-height', height + 'px');
+}).observe(updateNowBar);
+
+function setNoticeLabel(element, value) {
+  if (element.textContent === value) return;
+  element.textContent = value;
+  element.removeAttribute('data-change');
+  void element.offsetWidth;
+  element.dataset.change = '';
+}
+
+function setNoticeIcon(element, name) {
+  if (element.dataset.glyph === name) return;
+  element.dataset.glyph = name;
+  element.replaceChildren(icon(name, 'currentColor'));
 }
 
 function hideLeavingUpdateBar() {
@@ -920,7 +1225,8 @@ reducedMotion.addEventListener('change', event => {
   if (event.matches) {
     pageTransition?.skipTransition();
     hideLeavingUpdateBar();
-    clearNowBarTimers();
+    updateNotice.motionChanged();
+    fileNotice.motionChanged();
     if (state) drawUpdate();
   }
 });
@@ -939,65 +1245,26 @@ function drawUpdateBar(message, error) {
 }
 
 function drawUpdateNowBar(phase, tag, percent) {
-  if (!phase) {
-    if (nowBarOpenedAt !== undefined) {
-      nowBarOpenedAt = undefined;
-      clearNowBarTimers();
-      updateNowBar.removeAttribute('data-expanded');
-      updateDownloadFace.inert = updateReadyFace.inert = true;
-      nowBarTimers = [setTimeout(() => updateNowBar.removeAttribute('data-visible'), 800),
-        setTimeout(() => { updateNowBar.hidden = true; }, 1300)];
-    }
-    if (reducedMotion.matches) {
-      clearNowBarTimers();
-      updateNowBar.removeAttribute('data-visible');
-      updateNowBar.hidden = true;
-    }
-    return;
-  }
-
-  const opening = nowBarOpenedAt === undefined;
-  if (opening) {
-    clearNowBarTimers();
-    nowBarOpenedAt = performance.now();
-    updateNowBar.hidden = false;
-  }
-  if (reducedMotion.matches) {
-    updateNowBar.dataset.visible = updateNowBar.dataset.expanded = '';
-  } else if (opening) {
-    nowBarTimers = [setTimeout(() => { updateNowBar.dataset.visible = ''; }, 400),
-      setTimeout(() => { updateNowBar.dataset.expanded = ''; }, 1000)];
-  }
-
+  if (!phase) return updateNotice.hide();
+  updateNotice.show();
   const downloading = phase === 'downloading';
-  const progress = $('update-progress');
-  if (downloading || !updateDownloadFace.inert) {
-    notice('update-download-message', tag + ' 버전을 다운받고 있습니다');
-    const value = downloading ? percent : 100;
-    progress.hidden = false;
-    progress.setAttribute('aria-valuenow', value);
-    progress.style.setProperty('--progress', value + '%');
-    $('update-percent').textContent = value + '%';
-  }
-  if (!downloading) {
-    const message = restartingUpdate || state.restartingUpdate ? '업데이트 적용 중…' : tag + ' 업데이트가 준비되었습니다';
-    if ($('update-ready-message').textContent !== message) $('update-ready-message').textContent = message;
-    $('update-restart').disabled = restartingUpdate || state.applyingUpdate || state.connecting;
-    if (!reducedMotion.matches && !updateDownloadFace.inert) {
-      if (!pendingReadyFace) {
-        const delay = Math.max(500, 2200 - (performance.now() - nowBarOpenedAt));
-        pendingReadyFace = setTimeout(() => {
-          updateDownloadFace.inert = true;
-          updateReadyFace.inert = false;
-          pendingReadyFace = undefined;
-        }, delay);
-        nowBarTimers.push(pendingReadyFace);
-      }
-      return;
-    }
-  }
-  updateDownloadFace.inert = !downloading;
-  updateReadyFace.inert = downloading;
+  const applying = restartingUpdate || state.restartingUpdate;
+  const value = downloading ? Math.min(100, Math.max(0, percent ?? 0)) : 100;
+  const title = tag + (downloading ? ' 다운로드 중' : applying ? ' 업데이트 적용 중…' : ' 업데이트 준비 완료');
+  setNoticeLabel($('update-notice-text'), title);
+  setNoticeIcon($('update-mark'), downloading ? 'downloads' : 'check');
+  updateNowBar.dataset.result = downloading ? '' : 'success';
+  updateNowBar.style.setProperty('--notice-progress', value);
+  $('update-percent').textContent = downloading ? value + '%' : '';
+  $('update-download-message').textContent = tag;
+  $('update-detail-percent').textContent = value + '%';
+  $('update-progress').setAttribute('aria-valuenow', value);
+  $('update-progress').style.setProperty('--progress', value + '%');
+  $('update-ready-message').textContent = downloading ? '설치 파일을 내려받고 검증합니다.' :
+    applying ? '업데이트를 적용하고 있습니다.' : '다운로드와 검증을 마쳤습니다. 다시 시작하면 새 버전이 적용됩니다.';
+  $('update-restart').hidden = downloading;
+  $('update-restart').disabled = applying || state.applyingUpdate || state.connecting;
+  updateNotice.fit();
 }
 
 let updateButtonError = '';
@@ -1074,6 +1341,11 @@ function apply(next, animate = true) {
   if (pageChangePending) {
     pendingPageState = next;
     return;
+  }
+  if (state?.connected && !next.connected) {
+    settingsOpen = false;
+    settingsTrigger = undefined;
+    servicePage = undefined;
   }
   if (animate && state && $('usage-setup').hidden &&
       (state.connected !== next.connected || !!state.serverUpdaterAccount !== !!next.serverUpdaterAccount)) {
@@ -1345,30 +1617,42 @@ function selectedFiles() {
 }
 
 function setSelectionIcon(action, label, glyph) {
-  action.title = label;
+  action.removeAttribute('title');
   action.setAttribute('aria-label', label);
   if (action.dataset.glyph === glyph && action.firstChild) {
     action.lastElementChild.textContent = label;
     return;
   }
   action.dataset.glyph = glyph;
-  action.replaceChildren(icon(glyph, action.classList.contains('danger') ? '#ff9c9e' : '#ecedef'), make('span', label));
+  action.replaceChildren(icon(glyph, 'currentColor'), make('span', label));
+  action.classList.remove('selection-icon-switch');
+  void action.offsetWidth;
+  action.classList.add('selection-icon-switch');
 }
 
 function updateSelection() {
   const files = selectedFiles();
   const single = files.length === 1;
   $('selection-bar').hidden = browserMode === 'picker' || !browserMode;
-  $('selection-count').textContent = files.length.toLocaleString('ko-KR') + '개 선택';
+  const count = $('selection-number');
+  const countText = files.length.toLocaleString('ko-KR');
+  if (count.textContent !== countText) {
+    count.textContent = countText;
+    count.classList.remove('selection-bump');
+    void count.offsetWidth;
+    count.classList.add('selection-bump');
+  }
+  $('selection-count').classList.toggle('on', !!files.length);
   $('open-selection').disabled = !single || transferring || loadingFolder;
   const folder = single && files[0].directory;
+  const foldersOnly = files.length > 0 && files.every(file => file.directory);
   const favorite = $('favorite-selection');
   favorite.hidden = browserMode !== 'remote';
-  favorite.disabled = !folder || transferring || loadingFolder;
-  const starred = !!folder && (state.settings.folderFavorites ?? []).includes(files[0].path);
+  favorite.disabled = !foldersOnly || transferring || loadingFolder;
+  const starred = foldersOnly && files.every(file => (state.settings.folderFavorites ?? []).includes(file.path));
   favorite.setAttribute('aria-pressed', String(starred));
-  setSelectionIcon(favorite, starred ? '즐겨찾기 제거' : '즐겨찾기 추가', 'star');
-  setSelectionIcon($('open-selection'), folder ? '폴더 열기' : '미리보기', folder ? 'files' : 'eye');
+  setSelectionIcon(favorite, starred ? '즐겨찾기 제거' : '즐겨찾기 추가', 'fsStar');
+  setSelectionIcon($('open-selection'), folder ? '폴더 열기' : '미리보기', folder ? 'fsOpen' : 'fsEye');
   $('download-selection').hidden = browserMode !== 'remote';
   $('delete-selection').hidden = browserMode === 'remote' && (!state.settings.remoteWrites ||
     browserPath === '/' && state.profile.provider === 'synology');
@@ -1382,7 +1666,9 @@ function updateSelection() {
   $('mkdir-button').disabled = !state.settings.remoteWrites || browserPath === '/' || transferring || loadingFolder;
   for (const id of ['download-selection', 'delete-selection']) $(id).disabled = !files.length || transferring || loadingFolder;
   $('clear-selection').disabled = !browserEntries.length || transferring || loadingFolder;
-  setSelectionIcon($('clear-selection'), files.length && files.length === browserEntries.length ? '선택 해제' : '전체 선택', 'clear');
+  setSelectionIcon($('clear-selection'), files.length && files.length === browserEntries.length ? '선택 해제' : '전체 선택', files.length && files.length === browserEntries.length ? 'fsNone' : 'fsAll');
+  for (const action of $('selection-bar').querySelectorAll('button')) action.setAttribute('aria-disabled', String(action.disabled));
+  hideFileToolbarTip();
   for (const item of $('browser-results').querySelectorAll('[data-file-path]')) {
     const active = selected.has(item.dataset.filePath);
     item.setAttribute('aria-pressed', String(active));
@@ -1418,41 +1704,119 @@ function chooseFile(file, event) {
   updateSelection();
 }
 
-function closeFileMenu(restoreFocus = false) {
+let fileMenuCloseTimer;
+function closeFileMenu(restoreFocus = false, immediate = false) {
   const menu = $('file-actions-menu');
-  if (menu.hidden) return;
+  clearTimeout(fileMenuCloseTimer);
   const trigger = menuTrigger;
   menuTrigger = null;
-  menu.hidden = true;
-  menu.replaceChildren();
-  if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+  if (!menu.hidden && !immediate && !reducedMotion.matches) {
+    menu.dataset.closing = '';
+    menu.inert = true;
+    fileMenuCloseTimer = setTimeout(() => { menu.hidden = true; menu.replaceChildren(); }, 150);
+  } else {
+    menu.hidden = true;
+    menu.replaceChildren();
+  }
+  if (restoreFocus) (trigger?.isConnected ? trigger : $('browser-results')).focus({ preventScroll: true });
 }
 
 function openFileMenu(trigger, x, y) {
   if (!browserMode || browserMode === 'picker' || transferring || loadingFolder) return;
-  const file = browserEntries.find(entry => entry.path === trigger.dataset.filePath);
-  if (!file) return;
-  closeFileMenu();
-  if (!selected.has(file.path)) chooseFile(file, {});
+  closeFileMenu(false, true);
+  hideFileToolbarTip();
+  const file = trigger && browserEntries.find(entry => entry.path === trigger.dataset.filePath);
+  if (file && !selected.has(file.path)) chooseFile(file, {});
   const menu = $('file-actions-menu');
-  const actions = [...$('selection-bar').querySelectorAll('button[data-glyph]')].filter(action => !action.hidden && !action.disabled);
-  for (const action of actions) {
-    const danger = action.classList.contains('danger');
-    const item = button('', () => {
-      closeFileMenu(true);
-      action.click();
-    }, danger ? 'danger' : '');
-    item.setAttribute('role', 'menuitem');
-    item.tabIndex = -1;
-    item.append(icon(action.dataset.glyph, danger ? '#ffb2ab' : '#a9c6f8'), make('span', action.getAttribute('aria-label')));
-    menu.append(item);
+  menu.inert = false;
+  delete menu.dataset.closing;
+  const heading = make('div', $('selection-count').textContent, 'file-menu-heading');
+  heading.setAttribute('role', 'presentation');
+  menu.append(heading);
+  let index = 0;
+  const groups = [...$('selection-bar').querySelectorAll('.selection-group'), $('clear-selection')];
+  for (const group of groups) {
+    const actions = (group.matches('button') ? [group] : [...group.querySelectorAll('button')]).filter(action => !action.hidden);
+    if (!actions.length) continue;
+    if (index) {
+      const separator = make('div', '', 'file-menu-separator');
+      separator.setAttribute('role', 'separator');
+      menu.append(separator);
+    }
+    for (const action of actions) {
+      const item = button('', () => {
+        if (action.disabled) return;
+        closeFileMenu(true);
+        action.click();
+      }, action.classList.contains('danger') ? 'danger' : '');
+      item.setAttribute('role', 'menuitem');
+      item.disabled = action.disabled;
+      item.setAttribute('aria-disabled', String(item.disabled));
+      item.tabIndex = -1;
+      item.style.setProperty('--item-index', index++);
+      if (action.hasAttribute('aria-pressed')) item.setAttribute('aria-pressed', action.getAttribute('aria-pressed'));
+      item.append(icon(action.dataset.glyph, 'currentColor'), make('span', action.getAttribute('aria-label')));
+      menu.append(item);
+    }
   }
   menuTrigger = trigger;
   menu.hidden = false;
-  menu.style.left = Math.max(8, Math.min(x, innerWidth - menu.offsetWidth - 8)) + 'px';
-  menu.style.top = Math.max(8, Math.min(y, innerHeight - menu.offsetHeight - 8)) + 'px';
-  menu.firstElementChild?.focus({ preventScroll: true });
+  const bounds = { width: menu.offsetWidth, height: menu.offsetHeight };
+  const flipX = x + bounds.width > innerWidth - 8;
+  const flipY = y + bounds.height > innerHeight - 8;
+  menu.style.left = Math.max(8, Math.min(innerWidth - bounds.width - 8, flipX ? x - bounds.width : x)) + 'px';
+  menu.style.top = Math.max(8, Math.min(innerHeight - bounds.height - 8, flipY ? y - bounds.height : y)) + 'px';
+  menu.style.transformOrigin = (flipX ? '100%' : '0%') + ' ' + (flipY ? '100%' : '0%');
+  menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
 }
+
+let fileTooltipTimer;
+const fileToolbarHints = {
+  'mkdir-button': ['폴더 만들기', '쓰기 가능한 NAS 폴더에서 사용'],
+  'open-selection': ['선택한 항목 열기', '파일 또는 폴더 1개 선택'],
+  'favorite-selection': ['추가 · 제거', '폴더만 선택'],
+  'download-selection': ['PC에 저장', '항목 선택'],
+  'rename-selection': ['이름 변경', '항목 1개 선택'],
+  'extract-selection': ['ZIP 해제', 'ZIP 파일 1개 선택'],
+  'delete-selection': ['선택 항목 삭제', '항목 선택'],
+  'clear-selection': ['', '선택할 항목 없음']
+};
+function hideFileToolbarTip() {
+  clearTimeout(fileTooltipTimer);
+  const tip = $('file-toolbar-tip');
+  delete tip.dataset.visible;
+  for (const action of $('selection-bar').querySelectorAll('[aria-describedby]')) action.removeAttribute('aria-describedby');
+}
+function showFileToolbarTip(action) {
+  const tip = $('file-toolbar-tip');
+  const [description, condition] = fileToolbarHints[action.id] || [];
+  tip.replaceChildren(make('strong', action.getAttribute('aria-label')));
+  if (description) tip.append(make('small', description));
+  if (action.disabled && condition) tip.append(make('em', transferring ? '파일 작업 완료 후 사용' : loadingFolder ? '폴더를 불러오는 중' : condition));
+  tip.hidden = false;
+  const bounds = action.getBoundingClientRect();
+  const width = tip.offsetWidth;
+  tip.style.left = Math.max(width / 2 + 8, Math.min(innerWidth - width / 2 - 8, bounds.left + bounds.width / 2)) + 'px';
+  tip.style.top = Math.max(8, Math.min(innerHeight - tip.offsetHeight - 8, bounds.bottom + 10)) + 'px';
+  tip.dataset.visible = '';
+  action.setAttribute('aria-describedby', tip.id);
+}
+$('selection-bar').addEventListener('pointerover', event => {
+  const action = event.target.closest('button');
+  if (!action || action.contains(event.relatedTarget)) return;
+  hideFileToolbarTip();
+  fileTooltipTimer = setTimeout(() => showFileToolbarTip(action), 250);
+});
+$('selection-bar').addEventListener('pointerout', event => {
+  const action = event.target.closest('button');
+  if (action && !action.contains(event.relatedTarget)) hideFileToolbarTip();
+});
+$('selection-bar').addEventListener('focusin', event => {
+  const action = event.target.closest('button');
+  if (action) showFileToolbarTip(action);
+});
+$('selection-bar').addEventListener('focusout', hideFileToolbarTip);
+$('selection-bar').addEventListener('click', hideFileToolbarTip);
 
 async function openEntry(file) {
   if (!file || transferring || loadingFolder) return;
@@ -1497,6 +1861,7 @@ function fileLabel(file, className) {
   label.title = file.name;
   if (browserMode !== 'picker') {
     label.dataset.filePath = file.path;
+    label.draggable = browserMode === 'remote' && browserPath !== '/' && !!state.settings.remoteWrites;
     label.addEventListener('dblclick', event => {
       if (!event.metaKey && !event.ctrlKey && !event.shiftKey) void openEntry(file);
     });
@@ -1513,6 +1878,7 @@ function fileLabel(file, className) {
 
 function fileRow(file) {
   const row = make('tr');
+  if (file.directory) row.dataset.dropFolder = file.path;
   const nameCell = make('td');
   nameCell.append(fileLabel(file, 'file-name'));
   row.append(nameCell, make('td', file.directory ? '–' : bytes(file.size)),
@@ -1528,6 +1894,7 @@ function fileRow(file) {
 
 function fileCard(file) {
   const card = make('li', '', 'file-card');
+  if (file.directory) card.dataset.dropFolder = file.path;
   card.append(fileLabel(file, 'file-card-item'));
   return card;
 }
@@ -1665,7 +2032,8 @@ function enterBrowser(mode, path, fromDialog) {
 }
 
 function resetBrowser() {
-  closeFileMenu();
+  closeFileMenu(false, true);
+  hideFileToolbarTip();
   browseGeneration++;
   browserMode = null;
   mediaPicker = undefined;
@@ -1689,11 +2057,18 @@ function leaveBrowser() {
 async function transfer(action, progress, direction) {
   if (transferring || loadingFolder) return;
   transferring = true;
+  beginFileNotice();
   browseButtons();
-  notice('browser-status', progress);
+  notice('browser-status');
+  if (progress || direction === 'delete') {
+    showFileTransfer(direction || 'files', progress || '삭제 중…', '');
+    $('transfer-details').textContent = '';
+
+  }
   try {
     const result = await action();
-    if (direction && result) finishFileTransfer(direction, result.message, result.failed);
+    if (direction && result) finishFileTransfer(direction, result.message, result.failed, result.details);
+    else if (direction === 'delete' && !result) hideFileTransfer();
     if (progress && $('browser-status').textContent === progress) notice('browser-status');
     return result;
   } catch (error) {
@@ -1719,8 +2094,6 @@ document.body.dataset.platform = api.platform;
 $('sync-now').append(icon('sync', '#cbd8ef'));
 $('nas-edit').append(icon('pencil', '#cbd8ef'));
 $('update-now').append(icon('downloads', '#4ade80'));
-$('update-mark').append(icon('downloads'));
-$('update-ready-mark').append(icon('check'));
 $('edit-button').append(icon('pencil', '#cbd8ef'));
 $('account-button').append(icon('account', '#cbd8ef'));
 $('signin-settings').append(icon('account', '#cbd8ef'));
@@ -2420,13 +2793,14 @@ const musicIndicator = make('span', '', 'music-equalizer');
 musicIndicator.setAttribute('aria-hidden', 'true');
 musicIndicator.append(make('i'), make('i'), make('i'));
 $('music-toggle').append(musicIndicator);
-$('music-hide').append(icon('sidebar', '#a9c6f8'));
 $('music-toggle').addEventListener('click', () => {
   if (!musicOpen) return openMediaPlayer('audio');
   musicOpen = false;
   drawMusicPanel();
 });
-$('music-hide').addEventListener('click', () => {
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.defaultPrevented || !musicOpen || $('home').hidden || document.querySelector('dialog[open]')) return;
+  event.preventDefault();
   musicOpen = false;
   drawMusicPanel();
   $('music-toggle').focus();
@@ -2507,6 +2881,63 @@ $('ai-login-form').addEventListener('submit', async event => {
     if (!$('ai-login').hidden) password.focus();
   }
 });
+const aiSidebarMedia = matchMedia('(max-width: 820px)');
+let aiSidebarOpen = !aiSidebarMedia.matches;
+function setAiSidebar(open) {
+  aiSidebarOpen = open;
+  $('ai-home').classList.toggle('ai-sidebar-closed', !open);
+  $('ai-sidebar').inert = !open;
+  const toggle = $('ai-sidebar-toggle');
+  toggle.setAttribute('aria-expanded', String(open));
+  toggle.setAttribute('aria-label', open ? '대화 목록 접기' : '대화 목록 열기');
+}
+setAiSidebar(aiSidebarOpen);
+aiSidebarMedia.addEventListener('change', event => setAiSidebar(!event.matches));
+$('ai-sidebar-toggle').append(icon('sidebar'));
+$('ai-sidebar-toggle').addEventListener('click', () => setAiSidebar(!aiSidebarOpen));
+$('ai-new-icon').append(icon('add'));
+$('ai-search-icon').append(icon('search'));
+$('ai-welcome-icon').append(icon('sparkles'));
+$('ai-manage-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const { chat, action } = aiManageTarget;
+  void busy($('ai-manage-submit'), async () => {
+    const title = await api.aiManageChat(chat.id, action, elements('ai-manage-form').title.value);
+    $('ai-manage-dialog').close();
+    if (!aiChats.includes(chat)) return;
+    if (action === 'rename') {
+      chat.title = title;
+      chat.summarized = true;
+    } else {
+      aiChats = aiChats.filter(item => item !== chat);
+      if (activeAiChat === chat) {
+        activeAiChat = aiChats[0];
+        if (!activeAiChat) return newAiChat();
+      }
+    }
+    drawAiChat(true);
+  }, error => notice('ai-manage-error', error.message, true))();
+});
+function closeAiChatMenus() {
+  for (const menu of $('ai-chat-list').querySelectorAll('.ai-chat-menu:popover-open')) menu.hidePopover();
+}
+$('ai-chat-list').addEventListener('scroll', closeAiChatMenus);
+window.addEventListener('resize', closeAiChatMenus);
+$('ai-search').addEventListener('input', drawAiChatList);
+$('ai-suggestions').addEventListener('click', event => {
+  const control = event.target.closest('button');
+  if (!control) return;
+  const input = elements('ai-form').message;
+  input.value = control.textContent + ' ';
+  input.focus();
+  drawAiRequestStatus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.defaultPrevented || !aiSidebarMedia.matches || !aiSidebarOpen ||
+      $('ai-home').hidden || $('ai-usage').open) return;
+  setAiSidebar(false);
+  $('ai-sidebar-toggle').focus();
+});
 $('ai-new-chat').addEventListener('click', newAiChat);
 document.addEventListener('pointerdown', event => {
   const usage = $('ai-usage');
@@ -2519,14 +2950,14 @@ $('ai-usage').addEventListener('keydown', event => {
   $('ai-usage-toggle').focus();
 });
 $('ai-attach').append(icon('add'));
-$('ai-attach').addEventListener('click', async () => {
+async function attachAiFiles(filesToAttach) {
   const chat = activeAiChat;
   if (!chat || $('ai-attach').disabled) return;
   choosingAiAttachments = true;
   drawAiRequestStatus();
   notice('ai-error');
   try {
-    const { files, errors } = await api.aiPickFiles();
+    const { files, errors } = await (filesToAttach ? api.aiAttachDropped(filesToAttach) : api.aiPickFiles());
     if (!aiChats.includes(chat)) return;
     const drafts = chat.draftFiles ??= [];
     for (const file of files) {
@@ -2545,6 +2976,24 @@ $('ai-attach').addEventListener('click', async () => {
     drawAiAttachments();
     drawAiRequestStatus();
   }
+}
+$('ai-attach').addEventListener('click', () => void attachAiFiles());
+const aiDropZone = $('ai-home');
+aiDropZone.addEventListener('dragover', event => {
+  if (!draggingLocalFiles(event)) return;
+  event.preventDefault();
+  const allowed = !aiDropZone.hidden && !$('ai-attach').disabled;
+  event.dataTransfer.dropEffect = allowed ? 'copy' : 'none';
+  $('ai-form').classList.toggle('file-drop-target', allowed);
+});
+aiDropZone.addEventListener('dragleave', event => {
+  if (!aiDropZone.contains(event.relatedTarget)) $('ai-form').classList.remove('file-drop-target');
+});
+aiDropZone.addEventListener('drop', event => {
+  if (!draggingLocalFiles(event)) return;
+  event.preventDefault();
+  $('ai-form').classList.remove('file-drop-target');
+  if (!aiDropZone.hidden && !$('ai-attach').disabled) void attachAiFiles(Array.from(event.dataTransfer.files));
 });
 $('ai-send').append(icon('up'));
 $('ai-stop').append(icon('stop'));
@@ -2642,9 +3091,26 @@ for (const [id, feature, label, glyph] of [
   $('server-home-tiles').append(shortcut);
 }
 $('server-monitor-toggle').append(icon('activity', '#a9c6f8'));
-$('server-monitor-toggle').addEventListener('click', () => {
-  setServerMonitoringView($('server-monitor-controls').hidden);
-  $('server-monitor-title').scrollIntoView({ block: 'nearest' });
+$('server-monitor-options-button').append(icon('sliders'));
+$('server-monitor-register').prepend(icon('add'));
+$('server-monitor-toggle').addEventListener('click', () => $('server-monitor-title').scrollIntoView({ block: 'start' }));
+$('server-monitor-options-button').addEventListener('click', () => setServerMonitoringView($('server-monitor-options-button').getAttribute('aria-expanded') !== 'true'));
+$('server-monitor-register').addEventListener('click', () => setServerRegistration($('server-monitor-register').getAttribute('aria-expanded') !== 'true'));
+$('server-monitor-cancel').addEventListener('click', () => {
+  setServerRegistration(false);
+  $('server-monitor-register').focus();
+});
+document.addEventListener('click', event => {
+  if (!$('server-monitor-controls').hidden && !event.target.closest('#server-monitor-controls, #server-monitor-options-button')) {
+    setServerMonitoringView(false);
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('server-home').hidden && !$('server-monitor-controls').hidden && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    setServerMonitoringView(false);
+    $('server-monitor-options-button').focus();
+  }
 });
 $('server-deploy-form').addEventListener('submit', event => {
   event.preventDefault();
@@ -2669,17 +3135,68 @@ $('server-file-toggle').addEventListener('click', () => {
   else setServerProjectForm(false);
 });
 
+const serverSiteChecks = new Set();
 async function checkServerSites(id) {
+  if (serverSiteChecks.size || state.serverUpdaterAccount?.monitoring?.checking) return;
   notice('server-monitor-error');
+  serverSiteChecks.add(id ?? '*');
+  drawServerMonitoring(state.serverUpdaterAccount?.monitoring);
   try { apply(await api.serverMonitorCheck(id)); }
   catch (error) { notice('server-monitor-error', error.message, true); }
+  finally {
+    serverSiteChecks.clear();
+    drawServerMonitoring(state.serverUpdaterAccount?.monitoring);
+  }
 }
+let serverMonitorSaving = false;
+async function saveServerMonitorQuick() {
+  if (serverMonitorSaving) return;
+  const form = elements('server-monitor-settings');
+  serverMonitorSaving = true;
+  const controls = [...$('server-monitor-settings').querySelectorAll('input, button')];
+  controls.forEach(control => { control.disabled = true; });
+  notice('server-monitor-error');
+  try {
+    apply(await api.serverMonitorSettings({ enabled: form.enabled.checked,
+      deliveryEnabled: form.deliveryEnabled.checked, time: form.time.value }));
+  } catch (error) {
+    drawServerMonitoring(state.serverUpdaterAccount?.monitoring);
+    notice('server-monitor-error', error.message, true);
+  } finally {
+    serverMonitorSaving = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+}
+for (const name of ['enabled', 'deliveryEnabled']) {
+  elements('server-monitor-settings')[name].addEventListener('change', () => void saveServerMonitorQuick());
+}
+$('server-monitor-times').addEventListener('click', event => {
+  const choice = event.target.closest('[data-time]');
+  if (!choice || serverMonitorSaving) return;
+  elements('server-monitor-settings').time.value = choice.dataset.time;
+  for (const button of $('server-monitor-times').children) button.setAttribute('aria-pressed', String(button === choice));
+  void saveServerMonitorQuick();
+});
 
 $('server-monitor-check').addEventListener('click', () => void checkServerSites());
 for (const mode of ['list', 'grid']) {
   $('server-sites-' + mode).addEventListener('click', () => {
-    $('server-monitor-targets').classList.toggle('as-grid', mode === 'grid');
+    const targets = $('server-monitor-targets');
+    const grid = mode === 'grid';
+    if (targets.classList.contains('as-grid') === grid) return;
+    const cards = [...targets.querySelectorAll('.server-monitor-card')];
+    const animate = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const before = animate ? cards.map(card => card.getBoundingClientRect()) : [];
+    targets.classList.toggle('as-grid', grid);
+    $('server-sites-grid').parentElement.classList.toggle('as-list', !grid);
     for (const option of ['list', 'grid']) $('server-sites-' + option).setAttribute('aria-pressed', String(option === mode));
+    if (!animate) return;
+    cards.forEach((card, index) => {
+      card.getAnimations().forEach(animation => animation.cancel());
+      const after = card.getBoundingClientRect();
+      card.animate([{ transform: `translate(${before[index].x - after.x}px, ${before[index].y - after.y}px)`, opacity: .55 },
+        { transform: 'none', opacity: 1 }], { duration: 550, delay: index * 35, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    });
   });
 }
 
@@ -2755,7 +3272,8 @@ $('server-file-form').addEventListener('submit', event => {
 });
 for (const [id, save] of [['server-monitor-target', (input) => api.serverMonitorTarget(input)],
   ['server-monitor-settings', (input, form) => api.serverMonitorSettings({ ...input,
-    enabled: form.elements.enabled.checked, removeWebhook: form.elements.removeWebhook.checked })]]) {
+    enabled: form.elements.enabled.checked, deliveryEnabled: form.elements.deliveryEnabled.checked,
+    removeWebhook: form.elements.removeWebhook.checked })]]) {
   $(id).addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -2764,11 +3282,14 @@ for (const [id, save] of [['server-monitor-target', (input) => api.serverMonitor
       const next = await save(Object.fromEntries(new FormData(form)), form);
       if (id === 'server-monitor-target') {
         form.reset();
-        $('server-monitor-add').open = false;
+        setServerRegistration(false);
+        $('server-monitor-register').focus();
       }
       else {
         form.elements.webhook.value = '';
         form.elements.removeWebhook.checked = false;
+        setServerMonitoringView(false);
+        $('server-monitor-options-button').focus();
       }
       apply(next);
     }, error => notice('server-monitor-error', error.message, true))();
@@ -2852,8 +3373,13 @@ for (const [id, name] of [['settings-tray', 'trayVisible'], ['settings-launch', 
     apply(next);
   }, error => { drawSettings(); reportSettings(error); }));
 }
-for (const [id, action] of [['account-switch', () => api.switchNas()], ['logout-button', () => api.logout()],
-  ['settings-server-logout', async () => {
+for (const [id, action] of [['account-switch', () => api.switchNas()], ['logout-button', () => api.logout()]]) {
+  $(id).addEventListener('click', busy($(id), action, error => {
+    if (settingsOpen) reportSettings(error);
+    else toast(error.message);
+  }));
+}
+for (const [id, action] of [['settings-server-logout', async () => {
     const next = await api.serverUpdaterLogout(true);
     servicePage = undefined;
     apply(next);
@@ -2890,7 +3416,7 @@ async function requestUpdate(restart = false) {
 $('update-now').addEventListener('click', () => void requestUpdate());
 $('update-restart').addEventListener('click', () => void requestUpdate(true));
 document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || event.defaultPrevented || updateReadyFace.inert || restartingUpdate ||
+  if (event.key !== 'Escape' || event.defaultPrevented || state?.update?.phase !== 'ready' || restartingUpdate ||
       document.querySelector('dialog[open]')) return;
   dismissedUpdate = state.update.tag || state.update.version;
   drawUpdate();
@@ -2946,20 +3472,27 @@ $('settings-form').addEventListener('submit', event => {
 });
 $('browser-home').addEventListener('click', () => navigate(leaveBrowser));
 $('favorite-selection').addEventListener('click', () => {
-  const [folder] = selectedFiles();
-  if (browserMode !== 'remote' || selected.size !== 1 || !folder?.directory) return;
-  const enabled = !(state.settings.folderFavorites ?? []).includes(folder.path);
-  void api.folderFavorite(folder.path, enabled).catch(error => toast(error.message));
+  const folders = selectedFiles();
+  if (browserMode !== 'remote' || !folders.length || folders.some(file => !file.directory)) return;
+  const enabled = !folders.every(folder => (state.settings.folderFavorites ?? []).includes(folder.path));
+  void (async () => {
+    for (const folder of folders) await api.folderFavorite(folder.path, enabled);
+  })().catch(error => toast(error.message));
 });
 $('browser-remote').addEventListener('click', () => { if (browserMode !== 'remote') openBrowser('remote'); });
 $('browser-local').addEventListener('click', () => { if (browserMode !== 'local') openBrowser('local'); });
 $('browser-results').addEventListener('click', event => {
   if (!transferring && selected.size && !event.target.closest('.file-card, tr, button')) clearSelection();
 });
+$('browser-results').tabIndex = -1;
+$('browser-count').addEventListener('contextmenu', event => {
+  event.preventDefault();
+  openFileMenu(null, event.clientX, event.clientY);
+});
 $('browser-results').addEventListener('contextmenu', event => {
   const trigger = event.target.closest('[data-file-path]') ||
     event.target.closest('tr, .file-card')?.querySelector('[data-file-path]');
-  if (!trigger) return;
+  if (event.target.closest('input, textarea, [contenteditable]')) return;
   event.preventDefault();
   openFileMenu(trigger, event.clientX, event.clientY);
 });
@@ -2967,18 +3500,21 @@ document.addEventListener('pointerdown', event => {
   if (!$('file-actions-menu').contains(event.target)) closeFileMenu();
 });
 $('browser-results').addEventListener('scroll', () => closeFileMenu());
-window.addEventListener('resize', () => closeFileMenu());
+window.addEventListener('resize', () => { closeFileMenu(); hideFileToolbarTip(); });
+document.addEventListener('scroll', event => {
+  if (!$('file-actions-menu').contains(event.target)) { closeFileMenu(); hideFileToolbarTip(); }
+}, true);
 $('file-actions-menu').addEventListener('keydown', event => {
   if (event.key === 'Escape' || event.key === 'Tab') {
     if (event.key === 'Escape') event.preventDefault();
     closeFileMenu(true);
     return;
   }
-  const items = [...$('file-actions-menu').children];
+  const items = [...$('file-actions-menu').querySelectorAll('button:not(:disabled)')];
   const index = items.indexOf(document.activeElement);
   let target;
   if (event.key === 'ArrowDown') target = (index + 1) % items.length;
-  else if (event.key === 'ArrowUp') target = (index + items.length - 1) % items.length;
+  else if (event.key === 'ArrowUp') target = index <= 0 ? items.length - 1 : index - 1;
   else if (event.key === 'Home') target = 0;
   else if (event.key === 'End') target = items.length - 1;
   if (target === undefined) return;
@@ -3080,19 +3616,13 @@ $('delete-selection').addEventListener('click', () => {
   const mode = browserMode;
   const folder = browserPath;
   const items = selectedFiles().map(file => file.path);
-  let result;
-  void transfer(async () => { result = await api.delete(mode, folder, items); }, '삭제 중…').then(async () => {
+  void transfer(async () => {
+    const result = await api.delete(mode, folder, items);
     if (!result) return;
-    const message = `삭제 완료 ${result.deleted}개` +
-      (result.errors.length ? ` · 실패 ${result.errors.length}개 · ${result.errors[0]}` : '');
-    if (browserMode === mode && browserPath === folder) {
-      const pending = loadFolder(folder);
-      const generation = browseGeneration;
-      await pending;
-      if (generation === browseGeneration) notice('browser-status', message, !!result.errors.length);
-    } else {
-      toast(message);
-    }
+    return { failed: !!result.errors.length, message: `삭제 ${result.deleted}개` +
+      (result.errors.length ? ` · 실패 ${result.errors.length}개` : ''), details: result.errors };
+  }, undefined, 'delete').then(async result => {
+    if (result && browserMode === mode && browserPath === folder) await loadFolder(folder);
   });
 });
 document.addEventListener('keydown', event => {
@@ -3149,17 +3679,148 @@ $('pick-button').addEventListener('click', () => navigate(() => {
   elements(pickerDialog === 'area-dialog' ? 'area-form' : 'settings-form').remote.value = browserPath;
   leaveBrowser();
 }));
-$('upload-button').addEventListener('click', () => {
-  const folder = browserPath;
+function uploadNasFiles(folder, files, retryId) {
+  if (transferring || loadingFolder) return;
+  uploadRetry = undefined;
   void transfer(async () => {
-    const result = await api.upload(folder);
+    const result = await (files ? api.uploadDropped(folder, files) : api.upload(folder, undefined, retryId));
     if (!result) return;
+    uploadRetry = result.retryId ? () => uploadNasFiles(folder, undefined, result.retryId) : undefined;
     return { failed: !!result.errors.length, message: `업로드 ${result.uploaded}개` +
-      (result.errors.length ? ` · 실패 ${result.errors.length}개 · ${result.errors[0]}` : '') };
+      (result.skipped ? ` · 건너뛰기 ${result.skipped}개` : '') +
+      (result.errors.length ? ` · 실패 ${result.errors.length}개 · 눌러서 상세 보기` : ''), details: result.errors };
   }, undefined, 'upload').then(async result => {
     if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
   });
+}
+$('upload-button').addEventListener('click', () => uploadNasFiles(browserPath));
+
+let nasClipboard;
+document.addEventListener('keydown', event => {
+  if ((!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey ||
+      $('browser').hidden || browserMode !== 'remote' || transferring || loadingFolder ||
+      document.querySelector('dialog[open]') ||
+      event.target.closest('input, textarea, select, [contenteditable="true"]') ||
+      window.getSelection()?.toString()) return;
+  const key = event.key.toLowerCase();
+  if (key === 'c' && selected.size && browserPath !== '/') {
+    event.preventDefault();
+    nasClipboard = { folder: browserPath, paths: selectedFiles().map(file => file.path),
+      profile: state.profile.url + '\n' + state.profile.user };
+    finishFileTransfer('copy', nasClipboard.paths.length + '개 선택 · 대상 폴더에서 붙여넣으세요.');
+  } else if (key === 'v' && nasClipboard && browserPath !== '/' && state.settings.remoteWrites) {
+    event.preventDefault();
+    if (nasClipboard.profile !== state.profile.url + '\n' + state.profile.user) {
+      finishFileTransfer('copy', '복사한 NAS에 다시 연결해 주세요.', true);
+      return;
+    }
+    const clipboard = nasClipboard;
+    const folder = browserPath;
+    void transfer(async () => {
+      const result = await api.moveNas(clipboard.folder, clipboard.paths, folder, true);
+      if (!result) return;
+      return { failed: result.moved !== result.total, message: result.moved + '개 복사 · ' + folder };
+    }, undefined, 'copy').then(async result => {
+      if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
+    });
+  }
 });
+
+const nasDragType = 'application/x-sonac-nas-entries';
+const nasDropZone = $('browser').querySelector('.explorer-content');
+let nasDrag;
+let nasDropTarget;
+
+function draggingLocalFiles(event) {
+  return event.dataTransfer?.types.includes('Files');
+}
+
+function clearNasDropTarget() {
+  nasDropTarget?.classList.remove('file-drop-target');
+  nasDropTarget = undefined;
+}
+
+function canDropOnNas() {
+  return !$('browser').hidden && browserMode === 'remote' && !!state.settings.remoteWrites && !transferring && !loadingFolder;
+}
+
+nasDropZone.addEventListener('dragstart', event => {
+  const item = event.target.closest('[data-file-path]');
+  if (!item || !canDropOnNas() || browserPath === '/') return event.preventDefault();
+  const paths = selected.has(item.dataset.filePath) ? selectedFiles().map(file => file.path) : [item.dataset.filePath];
+  nasDrag = { folder: browserPath, paths };
+  event.dataTransfer.setData(nasDragType, 'move');
+  event.dataTransfer.effectAllowed = 'move';
+});
+
+function nasDropDestination(event, local) {
+  const folder = event.target.closest('[data-drop-folder]');
+  if (folder) {
+    const path = folder.dataset.dropFolder;
+    if (local || !nasDrag.paths.some(source => path === source || path.startsWith(source + '/'))) {
+      return { path, element: folder };
+    }
+    return;
+  }
+  if (local && browserPath !== '/') return { path: browserPath, element: $('browser-results') };
+}
+
+nasDropZone.addEventListener('dragover', event => {
+  const local = draggingLocalFiles(event);
+  const moving = nasDrag && event.dataTransfer.types.includes(nasDragType);
+  if (!local && !moving) return;
+  event.preventDefault();
+  const target = canDropOnNas() && nasDropDestination(event, local);
+  event.dataTransfer.dropEffect = target ? (local ? 'copy' : 'move') : 'none';
+  if (target?.element === nasDropTarget) return;
+  clearNasDropTarget();
+  if (target) {
+    nasDropTarget = target.element;
+    nasDropTarget.classList.add('file-drop-target');
+  }
+});
+nasDropZone.addEventListener('dragleave', event => {
+  if (!nasDropZone.contains(event.relatedTarget)) clearNasDropTarget();
+});
+document.addEventListener('dragend', () => {
+  nasDrag = undefined;
+  clearNasDropTarget();
+});
+nasDropZone.addEventListener('drop', event => {
+  const local = draggingLocalFiles(event);
+  const moving = nasDrag && event.dataTransfer.types.includes(nasDragType);
+  if (!local && !moving) return;
+  event.preventDefault();
+  clearNasDropTarget();
+  if (!canDropOnNas()) return;
+  const target = nasDropDestination(event, local);
+  if (!target) return;
+  if (local) {
+    uploadNasFiles(target.path, Array.from(event.dataTransfer.files));
+    return;
+  }
+  const { folder, paths } = nasDrag;
+  nasDrag = undefined;
+  void transfer(async () => {
+    const result = await api.moveNas(folder, paths, target.path);
+    if (!result) return;
+    const failed = result.total - result.moved;
+    return { failed: failed > 0, message: result.moved + '개 이동' +
+      (failed ? ' · ' + failed + '개는 원래 폴더에 남았습니다.' : ' · ' + target.path) };
+  }, undefined, 'move').then(async result => {
+    if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
+  });
+});
+for (const type of ['dragover', 'drop']) {
+  window.addEventListener(type, event => {
+    if (draggingLocalFiles(event)) event.preventDefault();
+    if (type === 'drop') {
+      clearNasDropTarget();
+      $('ai-form').classList.remove('file-drop-target');
+    }
+  });
+}
+
 $('editor-form').addEventListener('submit', event => {
   event.preventDefault();
   void busy(event.submitter, async () => {
@@ -3174,57 +3835,227 @@ $('editor-form').addEventListener('submit', event => {
 });
 
 const fileTransferBar = $('file-transfer-bar');
+const fileNotice = nowNotice(fileTransferBar, $('transfer-failure-panel'), $('transfer-expand'));
 let fileTransferTimer;
+let fileTransferDirection;
+let fileTransferItems = new Map();
+let fileTransferRetry;
+let uploadRetry;
+const transferScroll = { activeKey: null, pausedUntil: 0, timer: null, frame: null, automaticUntil: 0, dragging: false };
+const transferScrollPanel = $('transfer-failure-panel');
+transferScrollPanel.tabIndex = 0;
+function followTransferActive() {
+  transferScroll.frame = null;
+  if (!transferring || fileTransferDirection !== 'upload' ||
+      $('transfer-expand').getAttribute('aria-expanded') !== 'true' || performance.now() < transferScroll.pausedUntil) return;
+  const row = fileTransferItems.get(transferScroll.activeKey)?.element;
+  if (!row?.isConnected) return;
+  const panel = transferScrollPanel.getBoundingClientRect();
+  const item = row.getBoundingClientRect();
+  const padding = 12;
+  let top;
+  if (item.top < panel.top + padding) top = transferScrollPanel.scrollTop + item.top - panel.top - padding;
+  else if (item.bottom > panel.bottom - padding) top = transferScrollPanel.scrollTop + item.bottom - panel.bottom + padding;
+  if (top === undefined) return;
+  transferScroll.automaticUntil = performance.now() + 2000;
+  transferScrollPanel.scrollTo({ top: Math.max(0, top), behavior: reducedMotion.matches ? 'instant' : 'smooth' });
+}
+function queueTransferFollow() {
+  if (!transferScroll.frame) transferScroll.frame = requestAnimationFrame(followTransferActive);
+}
+function pauseTransferFollow() {
+  if (!transferring || fileTransferDirection !== 'upload') return;
+  transferScroll.pausedUntil = performance.now() + 10000;
+  clearTimeout(transferScroll.timer);
+  transferScroll.timer = setTimeout(() => {
+    if (transferScroll.dragging) return pauseTransferFollow();
+    transferScroll.pausedUntil = 0;
+    queueTransferFollow();
+  }, 10000);
+}
+transferScrollPanel.addEventListener('wheel', pauseTransferFollow, { passive: true });
+transferScrollPanel.addEventListener('touchmove', pauseTransferFollow, { passive: true });
+transferScrollPanel.addEventListener('pointerdown', event => {
+  if (event.target.closest('button')) return;
+  transferScroll.dragging = true;
+  pauseTransferFollow();
+});
+for (const name of ['pointerup', 'pointercancel']) document.addEventListener(name, () => {
+  if (transferScroll.dragging) pauseTransferFollow();
+  transferScroll.dragging = false;
+});
+transferScrollPanel.addEventListener('scroll', () => {
+  if (transferScroll.dragging || performance.now() >= transferScroll.automaticUntil) pauseTransferFollow();
+}, { passive: true });
+transferScrollPanel.addEventListener('keydown', event => {
+  if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key) && !event.target.closest('button')) pauseTransferFollow();
+});
+$('transfer-expand').addEventListener('click', queueTransferFollow);
+new ResizeObserver(queueTransferFollow).observe(transferScrollPanel);
+
 
 const transferLabels = {
   upload: { title: '파일 업로드', glyph: 'up' },
   download: { title: '파일 다운로드', glyph: 'downloads' },
-  extract: { title: 'ZIP 압축 풀기', glyph: 'extract' }
+  extract: { title: 'ZIP 압축 풀기', glyph: 'extract' },
+  move: { title: 'NAS 항목 이동', glyph: 'files' },
+  copy: { title: '파일 복사', glyph: 'copy' },
+  delete: { title: '파일 삭제', glyph: 'trash' },
+  files: { title: '파일 스테이션', glyph: 'files' }
 };
+
+function beginFileNotice() {
+  clearTimeout(transferScroll.timer);
+  cancelAnimationFrame(transferScroll.frame);
+  Object.assign(transferScroll, { activeKey: null, pausedUntil: 0, frame: null, automaticUntil: 0, dragging: false });
+  transferScroll.automaticUntil = performance.now() + 2000;
+  transferScrollPanel.scrollTop = 0;
+  clearTimeout(fileTransferTimer);
+  fileTransferItems = new Map();
+  fileTransferDirection = undefined;
+  fileTransferRetry = undefined;
+  $('transfer-file-list').replaceChildren();
+  $('transfer-failures').hidden = true;
+  $('transfer-retry').hidden = true;
+  fileNotice.collapse();
+}
 
 function showFileTransfer(direction, title, detail, result = '') {
   clearTimeout(fileTransferTimer);
-  const mark = $('transfer-mark');
-  const glyph = result === 'success' ? 'check' : result === 'error' ? 'activity' : transferLabels[direction].glyph;
-  if (mark.dataset.glyph !== glyph) {
-    mark.replaceChildren(icon(glyph, '#ecedef'));
-    mark.dataset.glyph = glyph;
-  }
+  fileTransferDirection = direction;
   fileTransferBar.dataset.result = result;
-  if ($('transfer-title').textContent !== title) $('transfer-title').textContent = title;
-  if ($('transfer-name').textContent !== detail) $('transfer-name').textContent = detail;
-  $('transfer-name').title = detail;
-  if (fileTransferBar.hidden) {
-    fileTransferBar.hidden = false;
-    void fileTransferBar.offsetWidth;
-  }
-  fileTransferBar.dataset.visible = fileTransferBar.dataset.expanded = '';
+  setNoticeIcon($('transfer-mark'), result === 'success' ? 'check' : result === 'error' ? 'activity' : transferLabels[direction].glyph);
+  $('transfer-title').textContent = title;
+  setNoticeLabel($('transfer-name'), result ? detail : detail || title);
+  $('transfer-name').title = detail || title;
+  fileNotice.show();
 }
 
-function finishFileTransfer(direction, message, failed) {
-  showFileTransfer(direction, transferLabels[direction].title + (failed ? ' 실패' : ' 완료'),
-    message, failed ? 'error' : 'success');
-  $('transfer-progress').hidden = true;
+function drawTransferItems() {
+  const list = $('transfer-file-list');
+  for (const item of fileTransferItems.values()) {
+    if (!item.element) {
+      item.element = make('div', '', 'now-file');
+      const line = make('div', '', 'now-detail-line');
+      item.nameElement = make('strong');
+      item.progressLabel = make('span');
+      line.append(item.nameElement, item.progressLabel);
+      item.meter = make('div', '', 'update-progress');
+      item.meter.setAttribute('role', 'progressbar');
+      item.meter.setAttribute('aria-valuemin', '0');
+      item.meter.setAttribute('aria-valuemax', '100');
+      item.meter.append(make('span'));
+      item.note = make('p', '', 'now-detail-note');
+      item.element.append(line, item.meter, item.note);
+      list.append(item.element);
+    }
+    const status = item.status || 'transferring';
+    const value = ['done', 'skipped'].includes(status) ? 100 :
+      Number.isFinite(item.total) && item.total > 0 ? Math.min(100, Math.round(item.bytes / item.total * 100)) : null;
+    item.element.dataset.status = status;
+    item.nameElement.textContent = item.name;
+    item.nameElement.title = item.name;
+    item.meter.setAttribute('aria-label', item.name + ' 전송 진행률');
+    if (value === null) item.meter.removeAttribute('aria-valuenow');
+    else item.meter.setAttribute('aria-valuenow', value);
+    item.meter.style.setProperty('--progress', (value ?? 0) + '%');
+    item.progressLabel.textContent = status === 'done' ? '완료' : status === 'skipped' ? '건너뜀' :
+      status === 'error' ? '실패' : status === 'queued' ? '대기' : (value === null ? bytes(item.bytes || 0) : value + '%');
+    item.note.textContent = item.error || (status === 'transferring' && ['upload', 'download'].includes(fileTransferDirection)
+      ? transferTimeRemaining(item) + (Number.isFinite(item.total) ? ' · ' + bytes(item.total) : '') :
+      Number.isFinite(item.total) ? bytes(item.total) : '');
+  }
+  fileNotice.fit();
+  queueTransferFollow();
+}
+
+function hideFileTransfer() {
+  clearTimeout(fileTransferTimer);
+  fileNotice.hide();
+}
+
+function finishFileTransfer(direction, message, failed, details) {
+  clearTimeout(transferScroll.timer);
+  if (!transferring || fileTransferDirection && fileTransferDirection !== direction) beginFileNotice();
+  showFileTransfer(direction, transferLabels[direction].title + (failed ? ' 실패' : ' 완료'), message, failed ? 'error' : 'success');
+  fileTransferBar.style.setProperty('--notice-progress', 100);
   $('transfer-details').textContent = '';
-  fileTransferTimer = setTimeout(() => {
-    delete fileTransferBar.dataset.expanded;
-    delete fileTransferBar.dataset.visible;
-    fileTransferTimer = setTimeout(() => { fileTransferBar.hidden = true; }, 550);
-  }, failed ? 8000 : 3000);
+  for (const item of fileTransferItems.values()) {
+    if (item.status === 'transferring' || item.status === 'queued') item.status = failed ? 'error' : 'done';
+  }
+  drawTransferItems();
+  const failures = Array.isArray(details) && details.length ? details.join('\n\n') : failed ? message : '';
+  $('transfer-failures').textContent = failures;
+  $('transfer-failures').hidden = !failures;
+  fileTransferRetry = failed && direction === 'upload' ? uploadRetry : undefined;
+  $('transfer-retry').hidden = !fileTransferRetry;
+  if (!fileTransferItems.size && !failures) {
+    $('transfer-failures').textContent = message;
+    $('transfer-failures').hidden = false;
+  }
+  fileNotice.fit();
+  if (!failed) fileTransferTimer = setTimeout(hideFileTransfer, 3000);
+}
+
+$('transfer-retry').addEventListener('click', () => {
+  if (transferring || !fileTransferRetry) return;
+  const retry = fileTransferRetry;
+  fileTransferRetry = undefined;
+  retry();
+});
+$('transfer-close').addEventListener('click', hideFileTransfer);
+for (const [element, controller] of [[fileTransferBar, fileNotice], [updateNowBar, updateNotice]]) {
+  document.addEventListener('click', event => {
+    if (!element.contains(event.target)) controller.collapse();
+  });
+  element.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    controller.collapse();
+  });
+}
+
+function transferTimeRemaining(info) {
+  if (Number.isFinite(info.total) && info.bytes >= info.total) return '전송 확인 중…';
+  if (!Number.isFinite(info.total) || !Number.isFinite(info.rate) || info.rate <= 0 || info.elapsed < 1) {
+    return '남은 시간 계산 중…';
+  }
+  const seconds = Math.max(1, Math.ceil((info.total - info.bytes) / info.rate));
+  if (seconds < 60) return '이 파일 약 ' + seconds + '초 남음';
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return '이 파일 약 ' + minutes + '분 남음';
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return '이 파일 약 ' + hours + '시간' + (remainder ? ' ' + remainder + '분' : '') + ' 남음';
 }
 
 api.onTransfer(info => {
   if (!transferring) return;
-  showFileTransfer(info.direction, transferLabels[info.direction].title + ' 진행 중…', info.name);
-  const meter = $('transfer-progress');
-  const percent = info.total === null ? null : info.total === 0 ? 100 :
-    Math.max(0, Math.min(100, Math.round(info.bytes / info.total * 100)));
-  meter.hidden = false;
-  if (percent === null) meter.removeAttribute('aria-valuenow');
-  else meter.setAttribute('aria-valuenow', percent);
-  meter.style.setProperty('--progress', (percent ?? 0) + '%');
-  $('transfer-details').textContent = percent === null ? (info.direction === 'extract' ? '' : bytes(info.bytes)) : percent + '%';
+  if (info.items) {
+    for (const [index, item] of info.items.entries()) {
+      const key = 'batch-' + index;
+      if (!fileTransferItems.has(key)) fileTransferItems.set(key, { name: item.name, total: item.size, bytes: 0, status: 'queued' });
+    }
+  }
+  const key = Number.isInteger(info.index) ? 'batch-' + info.index : info.name;
+  const item = fileTransferItems.get(key) || {};
+  Object.assign(item, info, { status: info.status || 'transferring' });
+  fileTransferItems.set(key, item);
+  transferScroll.activeKey = key;
+  const count = fileTransferItems.size;
+  const title = transferLabels[info.direction].title + ' 진행 중';
+  showFileTransfer(info.direction, title, count > 1 ? '파일 ' + count + '개 ' + title.replace(/^파일 /u, '') : info.name);
+  const items = [...fileTransferItems.values()];
+  const known = items.every(file => Number.isFinite(file.total) && file.total >= 0);
+  const total = known ? items.reduce((sum, file) => sum + file.total, 0) : null;
+  const completed = items.reduce((sum, file) => sum + (['done', 'skipped'].includes(file.status) ? file.total || 0 : file.bytes || 0), 0);
+  const percent = total === null ? null : total === 0 ? 100 : Math.min(100, Math.round(completed / total * 100));
+  fileTransferBar.style.setProperty('--notice-progress', percent ?? 0);
+  $('transfer-details').textContent = percent === null ? '' : percent + '%';
+  drawTransferItems();
 });
+
 
 drawTiles();
 const [serverId, serverLabel, serverGlyph] = serverTile;
