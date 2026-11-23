@@ -1286,7 +1286,7 @@ function serverMonitoringStatus(session) {
     enabled: settings.enabled, time: settings.time, hasWebhook: wrapped(settings.webhook),
     deliveryEnabled: settings.deliveryEnabled ?? wrapped(settings.webhook), dailyReports: settings.dailyReports,
     targets: settings.targets.map(({ id, name, url, latest }) => ({ id, name, url,
-      latest: latest && { status: latest.status, at: latest.at, latencyMs: latest.latencyMs, httpStatus: latest.httpStatus } })),
+      latest: latest && { status: latest.status, at: latest.at, latencyMs: latest.latencyMs, httpStatus: latest.httpStatus, issue: latest.issue } })),
     checking: !!session.monitor?.poll, latestReport: settings.latestReport, error: session.monitor?.error || ''
   };
 }
@@ -1323,7 +1323,7 @@ async function runServerMonitoring(session, runtime, targetId) {
   const { signal } = runtime;
   if (runtime.poll || signal.aborted || session.expiresAt <= Date.now() || !net.isOnline()) return;
   const settings = monitoringSettings(session);
-  const targets = targetId ? settings.targets.filter(target => target.id === targetId) : settings.targets;
+  const targets = settings.targets.filter(target => targetId ? target.id === targetId : reports.shouldProbeTarget(target, Date.now()));
   if (!targets.length) return;
   runtime.poll = true;
   publish();
@@ -1332,9 +1332,12 @@ async function runServerMonitoring(session, runtime, targetId) {
     signal.throwIfAborted();
     for (const [target, observation] of checks) {
       const incident = reports.recordObservation(target, observation);
-      if (incident && settings.enabled) settings.pending.push(incident);
+      if (incident) {
+        if (settings.enabled) settings.pending.push(incident);
+        else target.incident = false;
+      }
     }
-    settings.pending = settings.pending.slice(-20);
+    settings.pending = reports.confirmedIncidents(settings.pending, settings.targets).slice(-20);
     await persist();
     signal.throwIfAborted();
     if (settings.enabled && !runtime.report) void prepareServerMonitoringReport(session, runtime);
@@ -1353,41 +1356,35 @@ async function prepareServerMonitoringReport(session, runtime) {
   const { signal } = runtime;
   const settings = monitoringSettings(session);
   const window = reports.dailyReportWindow(Date.now(), settings.time);
-  const daily = window && settings.lastDaily !== window.day ? settings.targets.flatMap(target => {
-    const day = reports.summarizeDay(target.days?.[window.day]);
-    return day ? [{ service: target.name, day, comparison: reports.summarizeDay(target.days?.[window.comparison]) }] : [];
-  }) : [];
-  const incident = settings.pending[0];
+  const observedServices = window && settings.lastDaily !== window.day ? settings.targets.map(target => ({
+    service: target.name, day: reports.summarizeDay(target.days?.[window.day])
+  })) : [];
+  const daily = observedServices.some(item => item.day?.checks) ? observedServices : [];
+  const incidents = reports.confirmedIncidents(settings.pending, settings.targets);
+  const incident = incidents.length > 0;
   if (!incident && !daily.length) return;
   runtime.report = true;
   try {
-    const title = incident ? '서비스 이상 감지 · ' + incident.service : '서버 일일보고 · ' + window.day;
-    const instruction = incident ? '이상 유형, 원인 후보와 확인할 항목을 3~5줄로 작성하세요.'
-      : '전날 상태와 이전 날과의 차이, 주요 이벤트, 에러·경고 추세를 관측 범위에서 요약하세요.';
-    const fallback = incident ? (incident.event ? '모니터링 주소가 장애 이벤트를 보고했습니다.' :
-      '정상 이외 상태가 연속 ' + incident.consecutive + '회 감지됐습니다.') + ' HTTP 상태와 서버 로그를 확인하세요.'
-      : daily.map(({ service, day }) => service + ' · 확인 ' + day.checks + '회, 장애 ' + day.down + '회, 경고 ' + day.degraded + '회').join('\n');
-    let text;
-    try {
-      text = await reports.analyzeReport(await aiConnection(), instruction, incident || daily, signal);
-    } catch {
-      signal.throwIfAborted();
-      text = fallback + '\nEXAONE 분석을 사용할 수 없어 관측 결과를 표시합니다.';
-    }
+    const title = incident ? '서비스 이상 감지 · ' + (incidents.length === 1 ? incidents[0].service : incidents.length + '개 서비스') : '서버 일일보고 · ' + window.day;
+    // Render observed facts directly; do not add speculative AI diagnoses.
+    const { summary, text, sections } = incident ? reports.formatIncidentReport(incidents) : reports.formatDailyReport(daily);
     signal.throwIfAborted();
     const previousDaily = settings.lastDaily;
     const previousPending = settings.pending;
     const previousReport = settings.latestReport;
     const previousHistory = settings.dailyReports;
-    if (incident) settings.pending = settings.pending.filter(item => item !== incident);
+    if (incident) {
+      const ids = new Set(incidents.map(item => item.targetId));
+      settings.pending = settings.pending.filter(item => !ids.has(item.targetId));
+    }
     else settings.lastDaily = window.day;
     const webhook = incident || settings.deliveryEnabled !== false ? settings.webhook : undefined;
-    const report = { title, text: text.slice(0, 4000), at: Date.now(), delivery: wrapped(webhook) ? 'unconfirmed' : 'local' };
+    const report = { title, summary, sections, text: text.slice(0, 4000), at: Date.now(), delivery: wrapped(webhook) ? 'unconfirmed' : 'local' };
     if (!incident) {
       report.day = window.day;
       report.services = daily.length;
-      report.down = daily.reduce((total, item) => total + item.day.down, 0);
-      report.degraded = daily.reduce((total, item) => total + item.day.degraded, 0);
+      report.down = daily.reduce((total, item) => total + (item.day?.down ?? 0), 0);
+      report.degraded = daily.reduce((total, item) => total + (item.day?.degraded ?? 0), 0);
       const legacyDaily = /^서버 일일보고 · (\d{4}-\d{2}-\d{2})$/u.exec(previousReport?.title || '')?.[1];
       const history = previousHistory ?? (legacyDaily ? [{ ...previousReport, day: legacyDaily }] : []);
       settings.dailyReports = [report, ...history.filter(item => item.day !== report.day)].slice(0, 14);
@@ -1407,7 +1404,7 @@ async function prepareServerMonitoringReport(session, runtime) {
       try {
         const url = await unseal(safeStorage, webhook, monitoringBinding(session));
         signal.throwIfAborted();
-        await reports.sendDiscord(url, title, text, signal);
+        await reports.sendDiscord(url, title, summary, signal, sections);
         report.delivery = 'sent';
       } catch {
         report.delivery = 'failed';

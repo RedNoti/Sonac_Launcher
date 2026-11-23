@@ -739,7 +739,9 @@ function drawServerMonitoring(monitoring, previous) {
     const checking = serverSiteChecks.has('*') || serverSiteChecks.has(target.id) || !!monitoring.checking && !serverSiteChecks.size;
     row.dataset.tone = checking ? 'checking' : ({ healthy: 'good', degraded: 'warn', down: 'bad' }[status] ?? 'idle');
     row.setAttribute('aria-busy', String(checking));
-    row.querySelector('.server-site-result').textContent = checking ? '확인 중…' :
+    const issue = { timeout: '응답 시간 초과', network: '연결 실패', dns: '도메인 확인 실패', refused: '연결 거부', tls: '인증서 오류' }[target.latest?.issue] ||
+      (target.latest?.httpStatus && (target.latest.httpStatus < 200 || target.latest.httpStatus >= 300) ? 'HTTP ' + target.latest.httpStatus : '상태 점검 오류');
+    row.querySelector('.server-site-result').textContent = checking ? '확인 중…' : status === 'down' ? issue :
       [labels[status] ?? '확인 대기', Number.isFinite(latencyMs) ? latencyMs + 'ms' : ''].filter(Boolean).join(' · ');
     row.querySelector('.server-site-latency span').style.width = (checking ? 0 : status === 'down' ? 100 :
       Number.isFinite(latencyMs) ? Math.min(100, Math.max(0, latencyMs / 15)) : 0) + '%';
@@ -803,7 +805,17 @@ function drawServerReports(monitoring, previous) {
     }
     header.append(dateTile, info, icon('chevron', '#9aa1ae'));
     const content = make('div');
-    content.append(make('p', report.text, 'server-monitor-report-text'));
+    if (Array.isArray(report.sections) && report.sections.length) {
+      const services = make('div', '', 'server-report-services');
+      for (const section of report.sections) {
+        const service = make('section', '', 'server-report-service');
+        service.dataset.tone = section.tone;
+        service.append(make('h4', section.name), make('p', section.text));
+        services.append(service);
+      }
+      if (report.summary) content.append(make('p', report.summary, 'server-report-summary'));
+      content.append(services);
+    } else content.append(make('p', report.text, 'server-monitor-report-text'));
     body.append(content);
     card.append(header, body);
     return card;

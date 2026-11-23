@@ -7,6 +7,7 @@ const dayFormat = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', dat
 const timeFormat = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const limits = { cpuPercent: 100, memoryPercent: 100, diskPercent: 100, requestsPerMinute: 1e9,
   errorRatePercent: 100, p95LatencyMs: 1e7, processes: 1e6 };
+const recheckDelayMs = 5 * 60 * 1000;
 const eventKinds = ['deployment', 'configuration', 'restart', 'incident', 'recovery'];
 
 function localHealthUrl(url) {
@@ -77,12 +78,16 @@ async function probeTarget(target, signal) {
     const response = await request(target.url, { redirect: 'manual', signal: requestSignal });
     const latencyMs = Date.now() - started;
     const details = await responseTelemetry(response, Date.now());
+    requestSignal.throwIfAborted();
     signal.throwIfAborted();
     return { status: !response.ok ? 'down' : details?.status || 'healthy', httpStatus: response.status,
       latencyMs, details, at: Date.now() };
-  } catch {
+  } catch (error) {
     signal.throwIfAborted();
-    return { status: 'down', issue: requestSignal.aborted ? 'timeout' : 'network', at: Date.now() };
+    const code = error?.cause?.code ?? error?.code;
+    const issue = requestSignal.aborted ? 'timeout' : ['ENOTFOUND', 'EAI_AGAIN'].includes(code) ? 'dns' :
+      code === 'ECONNREFUSED' ? 'refused' : ['CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code) ? 'tls' : 'network';
+    return { status: 'down', issue, at: Date.now() };
   }
 }
 
@@ -109,13 +114,77 @@ function recordObservation(target, observation) {
   const seenEvents = new Set(target.seenEvents ?? []);
   const event = externalEvents.find(item => !seenEvents.has(item.at) && observation.at - Date.parse(item.at) <= 300000);
   target.seenEvents = [...new Set([...seenEvents, ...externalEvents.map(item => item.at)])].slice(-60);
-  if (target.consecutive >= 2 && !target.incident) {
-    target.incident = true;
-    return { service: target.name, previous, consecutive: target.consecutive, observation, event };
+  if (!unhealthy) {
+    target.incident = false;
+    delete target.failureSince;
+    delete target.nextCheckAt;
+    return null;
   }
-  if (!unhealthy) target.incident = false;
-  else if (event) target.incident = true;
-  return event ? { service: target.name, previous, consecutive: target.consecutive, observation, event } : null;
+  if (!Number.isFinite(target.failureSince) || target.failureSince > observation.at) {
+    target.failureSince = observation.at;
+    target.incident = false;
+  }
+  // Stop retrying every minute during an outage, including after an alert is sent.
+  target.nextCheckAt = observation.at + recheckDelayMs;
+  if (target.consecutive >= 2 && observation.at - target.failureSince >= recheckDelayMs && !target.incident) {
+    target.incident = true;
+    return { targetId: target.id, service: target.name, previous, consecutive: target.consecutive,
+      observation, event, failureSince: target.failureSince, confirmedAt: observation.at };
+  }
+  return null;
+}
+
+function shouldProbeTarget(target, now) {
+  return !Number.isFinite(target.nextCheckAt) || target.nextCheckAt <= now;
+}
+
+function confirmedIncidents(pending, targets) {
+  const byId = new Map(targets.map(target => [target.id, target]));
+  const unique = new Map();
+  for (const incident of pending ?? []) {
+    const target = byId.get(incident.targetId);
+    if (!target || !target.incident || target.latest?.status === 'healthy' ||
+        !Number.isFinite(incident.confirmedAt) || !Number.isFinite(incident.failureSince) ||
+        incident.confirmedAt - incident.failureSince < recheckDelayMs || target.failureSince !== incident.failureSince) continue;
+    unique.set(target.id, { ...incident, service: target.name });
+  }
+  return [...unique.values()];
+}
+
+function observationIssue(observation) {
+  const issues = { timeout: '응답 시간 초과', network: '서버 연결 실패', dns: '도메인 주소 확인 실패',
+    refused: '서버가 연결을 거부함', tls: 'HTTPS 인증서 확인 실패' };
+  if (issues[observation.issue]) return issues[observation.issue];
+  if (Number.isFinite(observation.httpStatus) && (observation.httpStatus < 200 || observation.httpStatus >= 300)) return 'HTTP ' + observation.httpStatus + ' 응답';
+  return observation.status === 'degraded' ? '상태 점검에서 경고 보고' : '상태 점검에서 장애 보고';
+}
+
+function reportText(summary, sections) {
+  return summary + '\n\n' + sections.map(section => '[' + section.name + ']\n' + section.text).join('\n\n');
+}
+
+function formatIncidentReport(incidents) {
+  const summary = '5분 뒤 재확인해도 이상이 있는 서비스 ' + incidents.length + '개';
+  const sections = incidents.map(incident => ({ name: incident.service,
+    text: observationIssue(incident.observation), tone: incident.observation.status === 'degraded' ? 'warn' : 'bad' }));
+  return { summary, sections, text: reportText(summary, sections) };
+}
+
+function formatDailyReport(daily) {
+  const sections = daily.map(({ service, day }) => {
+    if (!day?.checks) return { name: service, text: '관측 기록 없음', tone: 'idle' };
+    const failures = [];
+    if (day.down) failures.push('응답 실패 ' + day.down + '회');
+    if (day.degraded) failures.push('상태 경고 ' + day.degraded + '회');
+    const latency = Number.isFinite(day.averageLatencyMs) ? '평균 ' + day.averageLatencyMs + 'ms' : '';
+    return { name: service, text: [failures.join(' · ') || '정상', latency].filter(Boolean).join(' · '),
+      tone: day.down ? 'bad' : day.degraded ? 'warn' : 'good' };
+  });
+  const healthy = sections.filter(section => section.tone === 'good').length;
+  const unhealthy = sections.filter(section => ['bad', 'warn'].includes(section.tone)).length;
+  const unobserved = sections.filter(section => section.tone === 'idle').length;
+  const summary = '정상 ' + healthy + '개 · 이상 ' + unhealthy + '개' + (unobserved ? ' · 관측 없음 ' + unobserved + '개' : '');
+  return { summary, sections, text: reportText(summary, sections) };
 }
 
 function dailyReportWindow(now, time) {
@@ -138,15 +207,22 @@ function discordWebhook(input) {
   return url;
 }
 
-async function sendDiscord(webhook, title, report, signal) {
+async function sendDiscord(webhook, title, report, signal, sections) {
   const url = discordWebhook(webhook);
   url.searchParams.set('wait', 'true');
+  const structured = Array.isArray(sections) && sections.length > 0;
+  const payload = { content: (title + '\n' + report).slice(0, 1950), allowed_mentions: { parse: [] } };
+  if (structured) payload.embeds = sections.slice(0, 10).map(section => ({
+    title: String(section.name).slice(0, 80), description: String(section.text).slice(0, 400),
+    color: { good: 0x4cc38a, warn: 0xe8b24a, bad: 0xff8f95, idle: 0x9aa1ae }[section.tone] ?? 0x9aa1ae
+  }));
+  else payload.flags = 4;
   let response;
   try {
     response = await httpsFetch(url, {
       method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: (title + '\n' + report).slice(0, 1950), allowed_mentions: { parse: [] }, flags: 4 })
+      body: JSON.stringify(payload)
     });
   } catch {
     signal.throwIfAborted();
@@ -165,4 +241,5 @@ async function analyzeReport(connection, instruction, facts, signal) {
 }
 
 module.exports = { analyzeReport, dailyReportWindow, discordWebhook, monitoringTarget, probeTarget,
-  recordObservation, sendDiscord, summarizeDay };
+  recordObservation, sendDiscord, summarizeDay, recheckDelayMs, shouldProbeTarget, confirmedIncidents,
+  observationIssue, formatIncidentReport, formatDailyReport };

@@ -1573,3 +1573,12 @@ tr.file-drop-target > td { background: #24416f; }
 
 .prompt-page #prompt-skip { margin-top: 18px; color: var(--muted); font-size: 13px; }
 #settings-extract-destination { flex: none; width: 140px; }
+
+.server-report-summary { margin: 0 22px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+.server-report-services { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; margin: 16px 22px 22px; }
+.server-report-service { padding: 14px 16px; background: #0f1218; border-radius: 16px; border-left: 3px solid #9aa1ae; }
+.server-report-service[data-tone="good"] { border-color: #4cc38a; }
+.server-report-service[data-tone="warn"] { border-color: #e8b24a; }
+.server-report-service[data-tone="bad"] { border-color: #ff8f95; }
+.server-report-service h4 { margin: 0 0 7px; font-size: 15px; }
+.server-report-service p { margin: 0; color: #d4d9e2; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
