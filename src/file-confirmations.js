@@ -11,4 +11,9 @@ async function confirmOperation(details, { skipFileConfirmations, ask, remember 
   return accepted;
 }
 
-module.exports = { confirmOperation };
+// Legacy shared/boolean flags are not proof of an explicit extraction choice.
+function skipExtractionConfirmation(settings) {
+  return settings?.extractPromptPreference?.version === 1 && settings.extractPromptPreference.skip === true;
+}
+
+module.exports = { confirmOperation, skipExtractionConfirmation };

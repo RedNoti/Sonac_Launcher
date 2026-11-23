@@ -36,6 +36,7 @@ let browserFolders = {};
 let browserView = 'grid';
 let browserEntries = [];
 let selected = new Set();
+let nasClipboard;
 let selectionAnchor = null;
 let previewJob;
 let menuTrigger;
@@ -1546,6 +1547,7 @@ function drawSettings() {
   $('settings-tray').checked = !!state.trayVisible;
   $('settings-launch').checked = !!state.launchAtLogin;
   $('settings-skip-file-confirmations').checked = !!state.skipFileConfirmations;
+  $('settings-skip-extract-confirmation').checked = !!state.skipExtractConfirmation;
   $('settings-extract-destination').value = state.extractInPlace ? 'here' : 'folder';
   $('account-writes').checked = !!settings?.remoteWrites;
   $('settings-auto-sync').checked = !!settings?.automatic;
@@ -1686,7 +1688,11 @@ function updateSelection() {
   for (const item of $('browser-results').querySelectorAll('[data-file-path]')) {
     const active = selected.has(item.dataset.filePath);
     item.setAttribute('aria-pressed', String(active));
-    item.closest('.file-card, tr').classList.toggle('selected', active);
+    const card = item.closest('.file-card, tr');
+    card.classList.toggle('selected', active);
+    const cut = nasClipboard?.cut && browserMode === 'remote' &&
+      nasClipboard.profile === state.profile.url + '\n' + state.profile.user && nasClipboard.paths.includes(item.dataset.filePath);
+    card.classList.toggle('is-cut', !!cut);
   }
 }
 
@@ -3379,7 +3385,7 @@ uninstallMac.addEventListener('click', busy(uninstallMac, () => api.uninstallMac
 $('settings-back').addEventListener('click', () => navigate(closeSettings));
 const reportSettings = error => notice('account-error', error.message, true);
 for (const [id, name] of [['settings-tray', 'trayVisible'], ['settings-launch', 'launchAtLogin'],
-  ['settings-auto-sync', 'automaticSync'], ['settings-skip-file-confirmations', 'skipFileConfirmations'], ['account-writes', 'remoteWrites']]) {
+  ['settings-auto-sync', 'automaticSync'], ['settings-skip-file-confirmations', 'skipFileConfirmations'], ['settings-skip-extract-confirmation', 'skipExtractConfirmation'], ['account-writes', 'remoteWrites']]) {
   const control = $(id);
   control.addEventListener('change', busy(control, async () => {
     notice('account-error');
@@ -3610,7 +3616,7 @@ function extractSelectedFile(folder, path, destination) {
 $('extract-selection').addEventListener('click', () => {
   const [entry] = selectedFiles();
   if (!entry) return;
-  if (state.skipFileConfirmations) return extractSelectedFile(browserPath, entry.path, state.extractInPlace ? 'here' : 'folder');
+  if (state.skipExtractConfirmation === true) return extractSelectedFile(browserPath, entry.path, state.extractInPlace ? 'here' : 'folder');
   extractTarget = { folder: browserPath, path: entry.path };
   $('extract-skip-confirmation').checked = false;
   $('extract-name').textContent = entry.name;
@@ -3625,7 +3631,7 @@ $('extract-form').addEventListener('submit', event => {
   void busy(event.submitter, async () => {
     if (remember) {
       apply(await api.setPreference('extractInPlace', destination === 'here'));
-      apply(await api.setPreference('skipFileConfirmations', true));
+      apply(await api.setPreference('skipExtractConfirmation', true));
     }
     $('extract-dialog').close();
     extractSelectedFile(folder, path, destination);
@@ -3686,6 +3692,10 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     selected = new Set(browserEntries.map(entry => entry.path));
     updateSelection();
+  } else if (event.key === 'Escape' && nasClipboard?.cut) {
+    event.preventDefault();
+    nasClipboard = undefined;
+    clearSelection();
   } else if (event.key === 'Escape' && selected.size) {
     event.preventDefault();
     clearSelection();
@@ -3724,7 +3734,6 @@ function uploadNasFiles(folder, files, retryId) {
 }
 $('upload-button').addEventListener('click', () => uploadNasFiles(browserPath));
 
-let nasClipboard;
 document.addEventListener('keydown', event => {
   if ((!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey ||
       $('browser').hidden || browserMode !== 'remote' || transferring || loadingFolder ||
@@ -3732,24 +3741,41 @@ document.addEventListener('keydown', event => {
       event.target.closest('input, textarea, select, [contenteditable="true"]') ||
       window.getSelection()?.toString()) return;
   const key = event.key.toLowerCase();
-  if (key === 'c' && selected.size && browserPath !== '/') {
+  if (['c', 'x'].includes(key) && selected.size && browserPath !== '/') {
+    if (key === 'x' && !state.settings.remoteWrites) return;
     event.preventDefault();
-    nasClipboard = { folder: browserPath, paths: selectedFiles().map(file => file.path),
+    nasClipboard = { folder: browserPath, paths: selectedFiles().map(file => file.path), cut: key === 'x',
       profile: state.profile.url + '\n' + state.profile.user };
-    finishFileTransfer('copy', nasClipboard.paths.length + '개 선택 · 대상 폴더에서 붙여넣으세요.');
+    updateSelection();
+    finishFileTransfer(key === 'x' ? 'move' : 'copy', nasClipboard.paths.length +
+      (key === 'x' ? '개 잘라내기 · 대상 폴더에서 붙여넣으세요.' : '개 복사 · 대상 폴더에서 붙여넣으세요.'));
   } else if (key === 'v' && nasClipboard && browserPath !== '/' && state.settings.remoteWrites) {
     event.preventDefault();
+    const direction = nasClipboard.cut ? 'move' : 'copy';
     if (nasClipboard.profile !== state.profile.url + '\n' + state.profile.user) {
-      finishFileTransfer('copy', '복사한 NAS에 다시 연결해 주세요.', true);
+      finishFileTransfer(direction, '선택한 NAS에 다시 연결해 주세요.', true);
       return;
     }
     const clipboard = nasClipboard;
     const folder = browserPath;
     void transfer(async () => {
-      const result = await api.moveNas(clipboard.folder, clipboard.paths, folder, true);
+      const result = await api.moveNas(clipboard.folder, clipboard.paths, folder, !clipboard.cut);
       if (!result) return;
-      return { failed: result.moved !== result.total, message: result.moved + '개 복사 · ' + folder };
-    }, undefined, 'copy').then(async result => {
+      if (clipboard.cut && nasClipboard === clipboard) {
+        if (result.moved === result.total) nasClipboard = undefined;
+        else if (result.moved > 0) {
+          // Retain only unmoved paths for retry; never delete local clipboard data on cancellation.
+          try {
+            const remaining = new Set((await api.list(clipboard.folder)).map(file => file.path));
+            clipboard.paths = clipboard.paths.filter(path => remaining.has(path));
+            if (!clipboard.paths.length) nasClipboard = undefined;
+          } catch { /* Keep the selection if the source cannot be checked. */ }
+        }
+      }
+      return { failed: result.moved !== result.total,
+        message: result.moved + (clipboard.cut ? '개 이동 · ' : '개 복사 · ') + folder };
+    }, undefined, direction).then(async result => {
+      updateSelection();
       if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
     });
   }

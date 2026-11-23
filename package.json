@@ -1,7 +1,7 @@
 {
   "name": "sonac_launcher",
   "productName": "sonac launcher",
-  "version": "0.4.5",
+  "version": "0.4.7",
   "description": "Windows와 macOS용 개인 파일 런처",
   "main": "src/main.js",
   "private": true,
@@ -31,7 +31,7 @@
     "electron": "45.4.1",
     "resedit": "3.1.1"
   },
-  "releaseVersion": "0.4.5",
+  "releaseVersion": "0.4.5.2",
   "overrides": {
     "@firebase/firestore": {
       "@grpc/grpc-js": "1.14.7"

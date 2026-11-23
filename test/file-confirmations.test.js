@@ -51,3 +51,17 @@ test('a failed preference save stops the operation instead of silently pretendin
     remember: async () => { throw new Error('disk full'); }
   }), /disk full/);
 });
+
+
+test('extraction opt-out requires an explicit independent preference and ignores legacy shared values', () => {
+  const { skipExtractionConfirmation } = require('../src/file-confirmations');
+  assert.equal(skipExtractionConfirmation({skipFileConfirmations:true}), false);
+  assert.equal(skipExtractionConfirmation({skipFileConfirmations:true,skipExtractConfirmation:true,extractInPlace:true}), false);
+  const settings = {extractPromptPreference:{version:1,skip:true},skipFileConfirmations:false};
+  assert.equal(skipExtractionConfirmation(settings),true);
+  settings.skipFileConfirmations=true;
+  assert.equal(skipExtractionConfirmation(settings),true);
+  settings.extractPromptPreference.skip=false;
+  assert.equal(skipExtractionConfirmation(settings),false);
+  assert.equal(skipExtractionConfirmation({extractPromptPreference:{version:1,skip:'true'}}),false);
+});

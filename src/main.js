@@ -20,7 +20,7 @@ const { extractAttachment, withAttachments, fileLimit, textLimit, attachmentLimi
 const { scanMediaFolders, musicTags, coverFile, readArtwork } = require('./music-library');
 const reports = require('./server-reports');
 const deployment = require('./server-deployment');
-const { confirmOperation } = require('./file-confirmations');
+const { confirmOperation, skipExtractionConfirmation } = require('./file-confirmations');
 const { manifestName } = require('./nas-integrity');
 const github = require('./github');
 const { fileName, syncExternal } = require('./areas');
@@ -254,6 +254,7 @@ function status() {
     trayVisible: !!tray,
     skipFileConfirmations: db?.skipFileConfirmations === true,
     extractInPlace: db?.extractInPlace === true,
+    skipExtractConfirmation: skipExtractionConfirmation(db),
     settings: current ? { ...settings, remoteWrites: current.remoteWrites } : null,
     github: wrapped(account?.token) ? { login: account.login, tracked: account.tracked } : null,
     runningAreas: [...areaJobs.keys()],
@@ -379,11 +380,13 @@ async function setPreference(name, enabled) {
   const automatic = name === 'automaticSync';
   const settings = automatic ? workspace(needConnection()) : db;
   const keys = { trayVisible: 'hideMenuBarIcon', launchAtLogin: 'launchAtLogin',
-    skipFileConfirmations: 'skipFileConfirmations', extractInPlace: 'extractInPlace' };
+    skipFileConfirmations: 'skipFileConfirmations', extractInPlace: 'extractInPlace',
+    skipExtractConfirmation: 'extractPromptPreference' };
   if (!automatic && (typeof name !== 'string' || !Object.hasOwn(keys, name))) throw new Error('설정을 찾을 수 없습니다.');
   const key = automatic ? 'automatic' : keys[name];
   const previous = settings[key];
-  const value = name === 'trayVisible' ? !enabled : enabled;
+  const value = name === 'skipExtractConfirmation' ? { version: 1, skip: enabled } :
+    name === 'trayVisible' ? !enabled : enabled;
   try {
     if (name === 'launchAtLogin') setLaunchAtLogin(enabled);
     else settings[key] = value;

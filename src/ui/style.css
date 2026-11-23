@@ -1582,3 +1582,5 @@ tr.file-drop-target > td { background: #24416f; }
 .server-report-service[data-tone="bad"] { border-color: #ff8f95; }
 .server-report-service h4 { margin: 0 0 7px; font-size: 15px; }
 .server-report-service p { margin: 0; color: #d4d9e2; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+
+.file-card.is-cut .file-card-item, .file-table tr.is-cut td { opacity: .45; }
