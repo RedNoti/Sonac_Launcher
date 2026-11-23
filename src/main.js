@@ -20,6 +20,7 @@ const { extractAttachment, withAttachments, fileLimit, textLimit, attachmentLimi
 const { scanMediaFolders, musicTags, coverFile, readArtwork } = require('./music-library');
 const reports = require('./server-reports');
 const deployment = require('./server-deployment');
+const { confirmOperation } = require('./file-confirmations');
 const { manifestName } = require('./nas-integrity');
 const github = require('./github');
 const { fileName, syncExternal } = require('./areas');
@@ -251,6 +252,8 @@ function status() {
     device,
     launchAtLogin: !!db?.launchAtLogin,
     trayVisible: !!tray,
+    skipFileConfirmations: db?.skipFileConfirmations === true,
+    extractInPlace: db?.extractInPlace === true,
     settings: current ? { ...settings, remoteWrites: current.remoteWrites } : null,
     github: wrapped(account?.token) ? { login: account.login, tracked: account.tracked } : null,
     runningAreas: [...areaJobs.keys()],
@@ -375,8 +378,10 @@ async function setPreference(name, enabled) {
   if (typeof enabled !== 'boolean') throw new Error('설정 값을 확인하세요.');
   const automatic = name === 'automaticSync';
   const settings = automatic ? workspace(needConnection()) : db;
-  const key = automatic ? 'automatic' : name === 'trayVisible' ? 'hideMenuBarIcon' : 'launchAtLogin';
-  if (!automatic && name !== 'trayVisible' && name !== 'launchAtLogin') throw new Error('설정을 찾을 수 없습니다.');
+  const keys = { trayVisible: 'hideMenuBarIcon', launchAtLogin: 'launchAtLogin',
+    skipFileConfirmations: 'skipFileConfirmations', extractInPlace: 'extractInPlace' };
+  if (!automatic && (typeof name !== 'string' || !Object.hasOwn(keys, name))) throw new Error('설정을 찾을 수 없습니다.');
+  const key = automatic ? 'automatic' : keys[name];
   const previous = settings[key];
   const value = name === 'trayVisible' ? !enabled : enabled;
   try {
@@ -578,9 +583,13 @@ function transferReporter(connection, direction, items) {
   };
 }
 
-async function confirmChange(connection, { title, message, detail, action }) {
+async function confirmChange(connection, details) {
   connection.abort.signal.throwIfAborted();
-  const accepted = await showPrompt({ title, message, detail, action, danger: action === '삭제', confirm: true });
+  const accepted = await confirmOperation({ ...details, danger: details.action === '삭제', confirm: true }, {
+    skipFileConfirmations: db.skipFileConfirmations,
+    ask: showPrompt,
+    remember: () => setPreference('skipFileConfirmations', true)
+  });
   connection.abort.signal.throwIfAborted();
   return accepted;
 }
@@ -2011,6 +2020,9 @@ function registerHandlers() {
         else if (prompt.details.rememberChoice) {
           closePrompt({ value: selected.value, applyToRemaining: accepted.applyToRemaining === true });
         } else closePrompt(selected.value);
+      } else if (prompt.details.allowSkipFileConfirmation === true && prompt.details.fileOperation === true &&
+          prompt.details.requiredConfirmation !== true && accepted?.accepted === true) {
+        closePrompt({ accepted: true, skipNext: accepted.skipNext === true });
       } else {
         closePrompt(accepted === true);
       }
@@ -2282,7 +2294,7 @@ function registerHandlers() {
     if (areaJobs.has(id)) return;
     if (area.source === 'github') {
       const confirmed = await confirmChange(connection, {
-        title: 'GitHub 최신 파일 적용', message: area.repository + '의 최신 커밋 파일을 적용할까요?',
+        fileOperation: true, title: 'GitHub 최신 파일 적용', message: area.repository + '의 최신 커밋 파일을 적용할까요?',
         detail: area.local + '\n경로가 같은 파일의 로컬 수정 내용은 덮어씁니다.',
         action: '최신 파일 적용'
       });
@@ -2365,7 +2377,7 @@ function registerHandlers() {
     try {
       const projects = areas.filter(area => area.source === 'github');
       if (projects.length && !await confirmChange(connection, {
-        title: '모든 항목 동기화',
+        fileOperation: true, title: '모든 항목 동기화',
         message: '등록된 항목을 동기화할까요? GitHub의 최신 파일이 같은 경로의 로컬 파일을 덮어씁니다.',
         detail: projects.map(area => area.name + ' · ' + area.repository).join('\n'),
         action: '모두 동기화'
@@ -2436,7 +2448,7 @@ function registerHandlers() {
     }
     if (result.canceled) return null;
     if (!await confirmChange(connection, {
-      title: 'NAS 파일 업로드', message: result.filePaths.length + '개 파일을 NAS에 업로드할까요?',
+      fileOperation: true, title: 'NAS 파일 업로드', message: result.filePaths.length + '개 파일을 NAS에 업로드할까요?',
       detail: connection.profile.url + '\n' + location + '\n\n' + result.filePaths.slice(0, 5).map(file => path.basename(file)).join('\n'),
       action: '업로드'
     })) return null;
@@ -2519,7 +2531,7 @@ function registerHandlers() {
       throw new Error('폴더를 자기 자신이나 하위 폴더로 옮길 수 없습니다.');
     }
     if (!await confirmChange(connection, {
-      title: copy ? 'NAS 항목 복사' : 'NAS 항목 이동', message: entries.length + (copy ? '개 항목을 이 폴더로 복사할까요?' : '개 항목을 이 폴더로 옮길까요?'),
+      fileOperation: true, title: copy ? 'NAS 항목 복사' : 'NAS 항목 이동', message: entries.length + (copy ? '개 항목을 이 폴더로 복사할까요?' : '개 항목을 이 폴더로 옮길까요?'),
       detail: connection.profile.url + '\n' + target, action: copy ? '복사' : '이동'
     })) return null;
     const task = await operate(connection, async (store, signal) => {
@@ -2555,7 +2567,7 @@ function registerHandlers() {
       throw new Error('공유 폴더 안에서 사용할 폴더 이름을 확인하세요.');
     }
     if (!await confirmChange(connection, {
-      title: 'NAS 폴더 만들기', message: '새 폴더를 만들까요?',
+      fileOperation: true, title: 'NAS 폴더 만들기', message: '새 폴더를 만들까요?',
       detail: connection.profile.url + '\n' + location + '/' + name, action: '폴더 만들기'
     })) return false;
     requireRemoteWrites(connection);
@@ -2679,7 +2691,7 @@ function registerHandlers() {
       ? '저장소에서 삭제합니다. 폴더를 선택하면 내부 파일도 함께 삭제됩니다.'
       : '이 PC의 휴지통으로 이동합니다.' + (workspace(connection).local ? ' 저장소에 남아 있는 파일은 다시 동기화될 수 있습니다.' : '');
     if (!await confirmChange(connection, {
-      title: '항목 삭제', message: '선택한 ' + entries.length + '개 항목을 삭제할까요?',
+      fileOperation: true, title: '항목 삭제', message: '선택한 ' + entries.length + '개 항목을 삭제할까요?',
       detail: (source === 'remote' ? connection.profile.url + '\n' + folder : directory) + '\n\n' + names + '\n\n' + description,
       action: '삭제'
     })) return null;

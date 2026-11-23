@@ -524,6 +524,16 @@
             <span>PC 로그인 시 자동 시작</span>
             <input id="settings-launch" class="setting-switch" type="checkbox" role="switch">
           </label>
+          <label class="setting-option">
+            <span>파일 작업 확인창 생략 <small>업로드·이동·삭제를 바로 실행합니다. 필수 보안 확인은 항상 표시됩니다.</small></span>
+            <input id="settings-skip-file-confirmations" class="setting-switch" type="checkbox" role="switch">
+          </label>
+          <label class="setting-option">
+            <span>압축 풀기 기본 위치 <small>확인창을 생략할 때 사용할 위치입니다.</small></span>
+            <select id="settings-extract-destination" aria-label="압축 풀기 기본 위치">
+              <option value="folder">새 폴더</option><option value="here">현재 폴더</option>
+            </select>
+          </label>
           <div class="setting-option">
             <span>앱 버전 <small id="settings-version"></small></span>
             <button id="account-update-check" type="button" aria-live="polite">업데이트 확인</button>
@@ -700,6 +710,7 @@
     </header>
     <p id="extract-name" class="work-meta"></p>
     <form id="extract-form">
+      <label class="check"><input id="extract-skip-confirmation" type="checkbox">이 위치를 기억하고 파일 작업 확인창 다시 보지 않기</label>
       <footer class="dialog-actions">
         <button type="submit" value="here">여기에 압축 풀기</button>
         <button type="submit" value="folder" class="primary">새 폴더에 압축 풀기</button>

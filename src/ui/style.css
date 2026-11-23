@@ -1570,3 +1570,6 @@ tr.file-drop-target > td { background: #24416f; }
 .prompt-page .prompt-choices button { width: 100%; min-height: 44px; border-radius: 14px; }
 
 .prompt-page #prompt-remember { margin-top: 18px; color: var(--muted); font-size: 13px; }
+
+.prompt-page #prompt-skip { margin-top: 18px; color: var(--muted); font-size: 13px; }
+#settings-extract-destination { flex: none; width: 140px; }

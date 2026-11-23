@@ -6,7 +6,11 @@ const accept = document.getElementById('prompt-accept');
 const cancel = document.getElementById('prompt-cancel');
 const message = document.getElementById('prompt-message');
 const detail = document.getElementById('prompt-detail');
+let allowSkipFileConfirmation = false;
 function answer(accepted) {
+  if (accepted === true && allowSkipFileConfirmation) {
+    accepted = { accepted: true, skipNext: document.getElementById('prompt-skip-input').checked };
+  }
   for (const button of dialog.querySelectorAll('button')) button.disabled = true;
   void api.answer(accepted).catch(() => {
     for (const button of dialog.querySelectorAll('button')) button.disabled = false;
@@ -27,6 +31,9 @@ void api.details().then(value => {
   message.hidden = !value.message;
   detail.textContent = value.detail || '';
   detail.hidden = !value.detail;
+  allowSkipFileConfirmation = value.allowSkipFileConfirmation === true && value.fileOperation === true &&
+    value.requiredConfirmation !== true && !value.choices;
+  document.getElementById('prompt-skip').hidden = !allowSkipFileConfirmation;
   if (value.choices) {
     const actions = document.getElementById('prompt-actions');
     actions.classList.add('prompt-choices');

@@ -1533,6 +1533,8 @@ function drawSettings() {
   $('settings-version').textContent = state.versionLabel || '';
   $('settings-tray').checked = !!state.trayVisible;
   $('settings-launch').checked = !!state.launchAtLogin;
+  $('settings-skip-file-confirmations').checked = !!state.skipFileConfirmations;
+  $('settings-extract-destination').value = state.extractInPlace ? 'here' : 'folder';
   $('account-writes').checked = !!settings?.remoteWrites;
   $('settings-auto-sync').checked = !!settings?.automatic;
   for (const id of ['settings-media-nav', 'settings-sync-nav', 'nas-account-row', 'github-account-row', 'nas-write-setting',
@@ -3365,7 +3367,7 @@ uninstallMac.addEventListener('click', busy(uninstallMac, () => api.uninstallMac
 $('settings-back').addEventListener('click', () => navigate(closeSettings));
 const reportSettings = error => notice('account-error', error.message, true);
 for (const [id, name] of [['settings-tray', 'trayVisible'], ['settings-launch', 'launchAtLogin'],
-  ['settings-auto-sync', 'automaticSync'], ['account-writes', 'remoteWrites']]) {
+  ['settings-auto-sync', 'automaticSync'], ['settings-skip-file-confirmations', 'skipFileConfirmations'], ['account-writes', 'remoteWrites']]) {
   const control = $(id);
   control.addEventListener('change', busy(control, async () => {
     notice('account-error');
@@ -3373,6 +3375,9 @@ for (const [id, name] of [['settings-tray', 'trayVisible'], ['settings-launch', 
     apply(next);
   }, error => { drawSettings(); reportSettings(error); }));
 }
+$('settings-extract-destination').addEventListener('change', busy($('settings-extract-destination'), async () => {
+  apply(await api.setPreference('extractInPlace', $('settings-extract-destination').value === 'here'));
+}, error => { drawSettings(); reportSettings(error); }));
 for (const [id, action] of [['account-switch', () => api.switchNas()], ['logout-button', () => api.logout()]]) {
   $(id).addEventListener('click', busy($(id), action, error => {
     if (settingsOpen) reportSettings(error);
@@ -3582,10 +3587,20 @@ $('rename-form').addEventListener('submit', event => {
   }, error => notice('rename-error', error.message, true))();
 });
 let extractTarget;
+function extractSelectedFile(folder, path, destination) {
+  void transfer(async () => {
+    const name = await api.extractArchive(folder, path, destination);
+    return { message: name ? name + ' 폴더에 압축을 풀었습니다.' : '현재 폴더에 압축을 풀었습니다.' };
+  }, undefined, 'extract').then(async result => {
+    if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
+  });
+}
 $('extract-selection').addEventListener('click', () => {
   const [entry] = selectedFiles();
   if (!entry) return;
+  if (state.skipFileConfirmations) return extractSelectedFile(browserPath, entry.path, state.extractInPlace ? 'here' : 'folder');
   extractTarget = { folder: browserPath, path: entry.path };
+  $('extract-skip-confirmation').checked = false;
   $('extract-name').textContent = entry.name;
   $('extract-form').querySelector('button[value="folder"]').title = entry.name.slice(0, -4) + '/';
   $('extract-dialog').showModal();
@@ -3594,13 +3609,15 @@ $('extract-form').addEventListener('submit', event => {
   event.preventDefault();
   const { folder, path } = extractTarget;
   const destination = event.submitter.value;
-  $('extract-dialog').close();
-  void transfer(async () => {
-    const name = await api.extractArchive(folder, path, destination);
-    return { message: name ? name + ' 폴더에 압축을 풀었습니다.' : '현재 폴더에 압축을 풀었습니다.' };
-  }, undefined, 'extract').then(async result => {
-    if (result && browserMode === 'remote' && browserPath === folder) await loadFolder(folder);
-  });
+  const remember = $('extract-skip-confirmation').checked;
+  void busy(event.submitter, async () => {
+    if (remember) {
+      apply(await api.setPreference('extractInPlace', destination === 'here'));
+      apply(await api.setPreference('skipFileConfirmations', true));
+    }
+    $('extract-dialog').close();
+    extractSelectedFile(folder, path, destination);
+  }, error => toast(error.message))();
 });
 $('download-selection').addEventListener('click', () => {
   const items = selectedFiles().map(file => file.path);
